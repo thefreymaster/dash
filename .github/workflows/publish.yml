@@ -1,0 +1,138 @@
+# Check Dash, build its image and publish it to GitHub Container Registry (ghcr.io).
+#
+# Every push to main, and every manual run (Actions → Publish image → Run workflow), runs
+# lint, tests and a build. If those pass, it builds the nginx image from ./Dockerfile and
+# pushes it as
+#   ghcr.io/<owner>/<repo>:<short commit sha>   every run
+#   ghcr.io/<owner>/<repo>:latest               runs on the default branch only
+# The Unraid server pulls it from there (README.md, "Deploying to Unraid").
+#
+# Needs one repository secret: VITE_MAPBOX_TOKEN, the PUBLIC Mapbox token (pk.…).
+
+name: Publish image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Runs queue up instead of overlapping, so an older commit can never push :latest after a
+# newer one. (A run that is still waiting is replaced by the next one.)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Lint, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      # Only a gate, so it runs without the Mapbox token. The image job builds again inside
+      # Docker, with the token.
+      - run: npm run build
+
+  image:
+    name: Build and push image
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # An image without a map is never wanted, and a secret sk. token must never end up in
+      # the public bundle. The value is never printed.
+      - name: Check the VITE_MAPBOX_TOKEN secret
+        env:
+          VITE_MAPBOX_TOKEN: ${{ secrets.VITE_MAPBOX_TOKEN }}
+        run: |
+          # The app trims the token, so surrounding whitespace in the secret is harmless.
+          token=$(printf '%s' "$VITE_MAPBOX_TOKEN" | tr -d '[:space:]')
+          case $token in
+            '')
+              echo "::error title=VITE_MAPBOX_TOKEN is missing::Add the repository secret VITE_MAPBOX_TOKEN (Settings → Secrets and variables → Actions → New repository secret) with the public Mapbox token (pk.…), then re-run this workflow. Nothing was published."
+              exit 1 ;;
+            sk.*)
+              echo "::error title=VITE_MAPBOX_TOKEN is a secret token::The VITE_MAPBOX_TOKEN secret holds a secret (sk.) Mapbox token. It would be readable by anyone in the shipped JavaScript. Replace it with a public pk. token and revoke the sk. token in your Mapbox account. Nothing was published."
+              exit 1 ;;
+            pk.*)
+              echo "VITE_MAPBOX_TOKEN is set and is a public (pk.) token." ;;
+            *)
+              echo "::error title=VITE_MAPBOX_TOKEN is not a public token::The VITE_MAPBOX_TOKEN secret does not start with 'pk.'. Use a public Mapbox token (pk.…). Nothing was published."
+              exit 1 ;;
+          esac
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Image name (lower-cased by the action, as Docker requires), tags and OCI labels.
+      # The title and description repeat the Dockerfile's. Otherwise they would become the
+      # repository's name and its (possibly empty) description.
+      - name: Image name, tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=,format=short
+          labels: |
+            org.opencontainers.image.title=Dash
+            org.opencontainers.image.description=A calm instrument cluster for the road (static PWA)
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # A build arg leaves the token readable in the image history (and in the build's
+          # provenance attestation). That is fine and deliberate: it is a PUBLIC pk. token,
+          # and Vite bakes it into the JavaScript that every visitor downloads anyway. Do not
+          # "fix" this with build secrets. They would only add complexity and hide nothing.
+          build-args: |
+            VITE_MAPBOX_TOKEN=${{ secrets.VITE_MAPBOX_TOKEN }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          first=${TAGS%%$'\n'*}
+          {
+            printf 'Pushed'
+            while IFS= read -r tag; do [ -z "$tag" ] || printf ' `%s`' "$tag"; done <<< "$TAGS"
+            printf ', digest `%s`\n\n' "$DIGEST"
+            printf 'This exact build: `%s@%s`. On the server: `./deploy.sh --image %s`\n' \
+              "${first%:*}" "$DIGEST" "$first"
+          } >> "$GITHUB_STEP_SUMMARY"
