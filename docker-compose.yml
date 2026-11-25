@@ -1,0 +1,26 @@
+# Alternative to ./deploy.sh for hosts that have the Docker Compose plugin:
+#
+#   docker compose up -d --build
+#
+# Compose reads VITE_MAPBOX_TOKEN and DASH_PORT from ./.env by itself. This uses the same
+# container name as deploy.sh, so pick one of the two. To switch, run `docker rm -f dash`
+# first. Unlike deploy.sh it keeps no dated images for rollback.
+name: dash
+
+services:
+  dash:
+    build:
+      context: .
+      args:
+        VITE_MAPBOX_TOKEN: ${VITE_MAPBOX_TOKEN:-}
+    image: dash:latest
+    container_name: dash
+    restart: unless-stopped
+    ports:
+      - "${DASH_PORT:-3274}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

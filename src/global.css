@@ -1,0 +1,102 @@
+/*
+ * Global CSS for Dash as an installed iOS PWA in landscape.
+ * Chakra's preflight handles box-sizing and element resets; this file only adds what an
+ * edge-to-edge, non-scrolling, kiosk-like web app needs. Colours/fonts come from the
+ * Chakra system (`src/theme/system.ts`).
+ */
+
+:root {
+  /* Safe-area insets (notch / Dynamic Island / home indicator). Needs `viewport-fit=cover`. */
+  --sat: env(safe-area-inset-top, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+
+  /*
+   * HUD insets: where the cluster's edge widgets sit. In landscape iOS reports the notch /
+   * Dynamic Island inset on BOTH sides (59px on current iPhones) whichever way the phone is
+   * turned, so per-side values keep the layout clear of the island on either side. The
+   * minimums keep a gutter on phones (and browsers) without insets; the bottom adds 6px
+   * above the home indicator, the top 8px below the screen edge (mockup `--edge`).
+   */
+  --hud-l: max(var(--sal), 16px);
+  --hud-r: max(var(--sar), 16px);
+  --hud-t: calc(var(--sat) + 8px);
+  --hud-b: calc(max(var(--sab), 8px) + 6px);
+
+  background-color: #000;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100dvh;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background-color: #000;
+}
+
+html,
+body {
+  /* No rubber-band scrolling or pull-to-refresh. */
+  overscroll-behavior: none;
+}
+
+body {
+  /* Pinning the body is what actually stops iOS Safari's elastic page bounce. */
+  position: fixed;
+  inset: 0;
+}
+
+body {
+  /* No selection, no long-press callout, no grey tap flash, no double-tap zoom. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  position: relative;
+  isolation: isolate;
+}
+
+/* Inputs (destination search) must stay selectable and typeable. */
+input,
+textarea,
+[contenteditable='true'] {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
+img,
+svg {
+  -webkit-user-drag: none;
+}
+
+/* A fade-in for elements that appear by leaving `display: none` (no exit needed). Only the
+ * starting opacity is given, so it fades to whatever opacity the element has. */
+@keyframes dash-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/*
+ * Day/night: the theme colour variables are registered as animatable <color> properties from
+ * JS (src/theme/themeCrossfade.ts, generated from the Chakra tokens). This one is a literal
+ * day/night pair inside the settings sheet's segmented control, registered here so its own
+ * transition can cross-fade it too.
+ */
+@property --segment-indicator-bg {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: transparent;
+}

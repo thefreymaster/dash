@@ -1,0 +1,191 @@
+/*
+ * Map feature styles: the host, Mapbox attribution placement and the vehicle puck.
+ * Imported by MapView after `mapbox-gl/dist/mapbox-gl.css`. Colours come from the Chakra CSS
+ * variables (they switch with the `.dark` class), with the day values as fallbacks.
+ */
+
+/* Host: own stacking context at z-index 0, so Mapbox's internal z-indexes (controls use 2)
+ * never compete with the HUD layered above it. */
+.dash-map {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  isolation: isolate;
+  z-index: 0;
+}
+
+.dash-map__gl {
+  position: absolute;
+  inset: 0;
+}
+
+.dash-map__gl .mapboxgl-canvas:focus {
+  outline: none;
+}
+
+/* ---------------------------------------------------------------------------
+ * Attribution + Mapbox logo — required by Mapbox's terms, must stay visible.
+ * Bottom-left inside the safe area, aligned with the HUD's left inset and stacked just above
+ * the compass strip (44 px tall at the HUD bottom inset, `--hud-l` / `--hud-b` from
+ * global.css): the gap between the speedometer and the compass is free in every state.
+ * (The bottom-right column holds the recenter chip and the trip / ETA chip and sheet.)
+ * The layout can move it with `--dash-map-attrib-left` / `--dash-map-attrib-bottom`.
+ * ------------------------------------------------------------------------- */
+.dash-map .mapboxgl-ctrl-bottom-left {
+  left: var(--dash-map-attrib-left, var(--hud-l, max(var(--sal, 0px), 16px)));
+  bottom: var(--dash-map-attrib-bottom, calc(var(--hud-b, calc(max(var(--sab, 0px), 8px) + 6px)) + 54px));
+  display: flex;
+  flex-direction: row-reverse; /* logo first, then the (i) that expands to the right */
+  align-items: center;
+  gap: 6px;
+}
+
+.dash-map .mapboxgl-ctrl-bottom-left > .mapboxgl-ctrl {
+  float: none;
+  clear: none;
+  margin: 0;
+}
+
+.dash-map a.mapboxgl-ctrl-logo {
+  margin: 0;
+  opacity: 0.85;
+}
+
+.dash-map .mapboxgl-ctrl-attrib.mapboxgl-compact {
+  margin: 0;
+  min-height: 20px;
+  background-color: var(--chakra-colors-glass-fill, rgba(250, 251, 253, 0.6));
+  -webkit-backdrop-filter: blur(12px) saturate(160%);
+  backdrop-filter: blur(12px) saturate(160%);
+  box-shadow: 0 0 0 0.5px var(--chakra-colors-glass-edge, rgba(20, 30, 50, 0.1));
+  color: var(--chakra-colors-text-secondary, rgba(10, 18, 32, 0.64));
+  font: 500 11px/20px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+}
+
+.dash-map .mapboxgl-ctrl-attrib a {
+  color: inherit;
+}
+
+.dash-map .mapboxgl-ctrl-attrib-button {
+  background-color: transparent;
+}
+
+[data-theme='night'] .dash-map .mapboxgl-ctrl-attrib-button {
+  filter: invert(1);
+}
+
+/* ---------------------------------------------------------------------------
+ * Vehicle puck (puck.ts). The root is a Mapbox Marker laid flat on the map plane; Mapbox
+ * owns its `transform` and `opacity`, so the entrance/stale states live on the children.
+ * `--dash-puck-r` (px) is the accuracy halo radius, written per frame.
+ * ------------------------------------------------------------------------- */
+.dash-puck {
+  width: 0;
+  height: 0;
+}
+
+.dash-puck__body {
+  position: absolute;
+  left: 0;
+  top: 0;
+  opacity: 0;
+  transform: scale(0.6);
+  transition:
+    opacity 0.5s cubic-bezier(0.2, 0.8, 0.2, 1),
+    transform 0.6s cubic-bezier(0.3, 1.35, 0.4, 1);
+}
+
+.dash-puck[data-visible='true'] .dash-puck__body {
+  opacity: 1;
+  transform: none;
+}
+
+.dash-puck__halo {
+  --r: var(--dash-puck-r, 36px);
+  position: absolute;
+  left: calc(var(--r) * -1);
+  top: calc(var(--r) * -1);
+  width: calc(var(--r) * 2);
+  height: calc(var(--r) * 2);
+  border-radius: 50%;
+  background-color: var(--chakra-colors-accent-subtle, rgba(10, 132, 255, 0.13));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--chakra-colors-accent-solid, #0a84ff) 28%, transparent);
+}
+
+.dash-puck__ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--chakra-colors-accent-solid, #0a84ff);
+  background: radial-gradient(
+    circle,
+    var(--chakra-colors-accent-subtle, rgba(10, 132, 255, 0.13)) 0,
+    var(--chakra-colors-accent-subtle, rgba(10, 132, 255, 0.13)) 45%,
+    transparent 70%
+  );
+  opacity: 0;
+  transform: scale(0.35);
+  animation: dash-puck-pulse 2.6s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+}
+
+.dash-puck__ring--late {
+  animation-delay: 1.3s;
+}
+
+@keyframes dash-puck-pulse {
+  0% {
+    transform: scale(0.35);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+
+.dash-puck__shadow {
+  position: absolute;
+  left: -21px;
+  top: -21px;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: rgba(10, 30, 60, 0.2);
+  filter: blur(5px);
+}
+
+/* The 38×44 mockup chevron drawn ~26 % larger: lying flat it is foreshortened by the pitch. */
+.dash-puck__arrow {
+  position: absolute;
+  left: -24px;
+  top: -28px;
+  width: 48px;
+  height: 56px;
+  overflow: visible;
+  filter: drop-shadow(0 0 4px rgba(0, 20, 50, 0.32));
+  transition:
+    opacity 0.5s,
+    filter 0.5s;
+}
+
+.dash-puck[data-stale='true'] .dash-puck__arrow {
+  opacity: 0.55;
+  filter: grayscale(1) drop-shadow(0 0 4px rgba(0, 20, 50, 0.32));
+}
+
+.dash-puck[data-stale='true'] .dash-puck__ring,
+.dash-puck:not([data-visible='true']) .dash-puck__ring {
+  /* No infinite pulse while it cannot be seen (stale, or before the first fix). */
+  animation: none;
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dash-puck__ring {
+    animation: none;
+  }
+  .dash-puck__body {
+    transform: none;
+    transition: opacity 0.2s;
+  }
+}

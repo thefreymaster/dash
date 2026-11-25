@@ -1,0 +1,20 @@
+<!doctype html>
+<!--
+  DEV ONLY map harness (served by `vite`, not part of the build):
+    /src/features/map/dev/harness.html?local&sim            token-free street grid + simulated drive
+    …&theme=night  …&speed=25 | speed=vary | speed=0  …&delay=1500  …&acc=30  …&bare
+  Without `local` it uses the real Mapbox Standard style (needs VITE_MAPBOX_TOKEN).
+  `bare` renders only MapView + RecenterChip instead of the full App layout.
+  Console / automation: window.__dashMap (see devHooks.ts).
+-->
+<html lang="en" class="light" data-theme="day" style="background-color: #000">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <title>Dash · map harness</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./harness.tsx"></script>
+  </body>
+</html>

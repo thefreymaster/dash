@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Dash app mark, "Glass" night palette: smoked-glass rounded square with a gauge arc.
+       Rounded variant (transparent corners) for the manifest `any` icons and the favicon. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c2434"/>
+      <stop offset="1" stop-color="#06080d"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.13"/>
+      <stop offset="0.48" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="lens" cx="256" cy="268" r="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4db2ff" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#4db2ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="arc" gradientUnits="userSpaceOnUse" x1="150" y1="374" x2="340" y2="140">
+      <stop offset="0" stop-color="#5ce1e6"/>
+      <stop offset="1" stop-color="#4db2ff"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+  </defs>
+  <rect x="0" y="0" width="512" height="512" rx="114" fill="url(#bg)"/>
+  <rect x="0" y="0" width="512" height="512" rx="114" fill="url(#lens)"/>
+  <rect x="0" y="0" width="512" height="512" rx="114" fill="url(#sheen)"/>
+  <rect x="1.5" y="1.5" width="509" height="509" rx="112.5" fill="none" stroke="#ffffff" stroke-opacity="0.16" stroke-width="3"/>
+  <!-- track: 270° arc open at the bottom, centre (256,268), r 150 -->
+  <path d="M149.93 374.07 A150 150 0 1 1 362.07 374.07" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="52" stroke-linecap="round"/>
+  <!-- value: 62 % of the sweep -->
+  <path d="M149.93 374.07 A150 150 0 0 1 336.37 141.35" fill="none" stroke="url(#arc)" stroke-width="52" stroke-linecap="round" filter="url(#glow)" opacity="0.55"/>
+  <path d="M149.93 374.07 A150 150 0 0 1 336.37 141.35" fill="none" stroke="url(#arc)" stroke-width="52" stroke-linecap="round"/>
+</svg>

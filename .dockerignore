@@ -1,0 +1,35 @@
+# Build context for the Dockerfile: only what `npm ci && npm run build` needs.
+
+# Dependencies and build output are recreated inside the image.
+node_modules
+dist
+dist-ssr
+dev-dist
+coverage
+**/*.tsbuildinfo
+
+# Secrets. The Mapbox token reaches the build only as --build-arg, never as a file.
+.env
+.env.*
+!.env.example
+**/*.local
+
+# Not needed for the build. Leaving them out also means editing them does not
+# invalidate the build cache.
+.git
+.gitignore
+mockups
+*.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+deploy.sh
+
+# Editor and OS junk.
+.vscode
+.idea
+**/.DS_Store
+**/Thumbs.db
+**/*.swp
+**/*.swo
+**/*.log
