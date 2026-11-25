@@ -76,7 +76,32 @@ export function arcOpacity(fraction: number): number {
   return (fraction - lo) / (hi - lo);
 }
 
-/** Digits shown on the speedometer: rounded reading, or an en dash while there is no fix. */
+/**
+ * The speed is live — fit to show as a number — only when a pose exists AND the speed is
+ * known (`pose.speedKnown`: a fresh fix with a usable speed). Otherwise the readout is the
+ * dimmed "–" and the arc is empty: never a remembered number, never a made-up 0.
+ */
+export function speedIsLive(hasPose: boolean, speedKnown: boolean): boolean {
+  return hasPose && speedKnown;
+}
+
+/** The digits show a number (not the dimmed "–") while the speed is live or the boot sweep runs. */
+export function readoutLive(speedLive: boolean, sweep: number): boolean {
+  return speedLive || sweep > 0;
+}
+
+/**
+ * Value the gauge heads for, in the display unit: the real speed only while it is live
+ * (an unknown speed eases the arc to empty, it is never shown as a remembered number),
+ * and never below the boot sweep (`sweep` × full scale).
+ */
+export function gaugeTarget(speedMps: number, live: boolean, sweep: number, factor: number, fullScale: number): number {
+  const real = live && Number.isFinite(speedMps) ? Math.max(0, speedMps) * factor : 0;
+  const boot = Number.isFinite(sweep) ? sweep * fullScale : 0;
+  return Math.max(real, boot);
+}
+
+/** Digits shown on the speedometer: rounded reading, or an en dash while there is no live speed. */
 export function speedDigits(value: number, ready: boolean): string {
   if (!ready) return '–';
   if (!Number.isFinite(value) || value <= 0) return '0';

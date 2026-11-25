@@ -106,6 +106,8 @@ function Segmented<T extends string>({
           // The indicator colour is a literal day/night pair (not a theme variable); it is a
           // registered <color> property (global.css), so it can cross-fade with the theme.
           transition: '--segment-indicator-bg 0.9s ease',
+          // Reduce Motion: the indicator jumps to the chosen option instead of sliding.
+          _motionReduce: { '--transition-duration': '0ms' },
         }}
       >
         <SegmentGroup.Indicator />
@@ -198,6 +200,7 @@ function DemoSetting() {
           _checked={{ bg: 'white' }}
           transitionTimingFunction="glassOut"
           transitionDuration="0.3s"
+          _motionReduce={{ transitionDuration: '0s' }}
         />
       </Switch.Control>
     </Switch.Root>

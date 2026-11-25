@@ -7,8 +7,9 @@ Home Screen and run from a phone mount.
 
 **Stack:** React 19 + TypeScript 7, Vite 8, Chakra UI 3, Motion, TanStack Query,
 Mapbox GL JS 3, SunCalc, and vite-plugin-pwa (Workbox `generateSW`, auto-update). Tests
-run with Vitest and linting with oxlint. In production, nginx serves the build inside a
-Docker container on the Unraid server, and Cloudflare Tunnel publishes it at
+run with Vitest and linting with oxlint. In production, GitHub Actions builds a Docker
+image in which nginx serves the build, and publishes it to GitHub Container Registry. The
+Unraid server pulls and runs that image, and Cloudflare Tunnel publishes it at
 `https://dash.unserver23.net`.
 
 ---
@@ -63,24 +64,183 @@ installing and updating, use the deployed site.
 
 ## 3. Deploying to Unraid
 
-The container is built **on the Unraid host** (the Mac has no Docker). The deploy files:
+GitHub builds the image and the server only pulls it. A push to `main` runs a GitHub
+Actions workflow: lint, tests and a build, then a Docker build. The workflow publishes
+the image to GitHub Container Registry (GHCR), and the Unraid server pulls it and runs
+it as the container `dash`. The Mac needs no Docker. Building on the server still
+works; see [3.5](#35-alternative-build-on-the-server).
+
+Below, `ghcr.io/<owner>/dash` means your GitHub user or organization and the repository
+name, **in lower case**, because Docker requires that. For example, user `Octocat` →
+`ghcr.io/octocat/dash`. If the repository has another name, use that name instead of
+`dash`.
 
 | File | Role |
 | --- | --- |
+| `.github/workflows/publish.yml` | On a push to `main` or a manual run: lint, test, build, then build the image and push `ghcr.io/<owner>/dash:latest` and `:<short commit sha>` |
 | `Dockerfile` | `node:24-alpine` runs `npm ci && npm run build`; `nginx:alpine` serves `dist/` on port 80 and has a `HEALTHCHECK` |
 | `nginx.conf` | Server block (installed as `conf.d/default.conf`): SPA fallback, PWA-safe caching, gzip, `/healthz` |
-| `deploy.sh` | Pull, build, replace the `dash` container, wait for health, keep dated images for rollback |
-| `docker-compose.yml` | The same service, for hosts with the Compose plugin |
+| `deploy.sh` | On the server: pull the published image (or build), replace the `dash` container, wait for health, keep dated images for rollback |
+| `docker-compose.yml` | The same service, for hosts with the Compose plugin. It builds locally; a comment in it shows how to run the published image instead |
 | `.dockerignore` | Keeps `node_modules`, `dist`, `.git`, `.env*` and mockups out of the build |
 
-### 3.1 Get the code onto the server
+### 3.1 One-time GitHub setup
 
-Open an SSH session to the server (`ssh root@<server-ip>`). The checkout lives at
-`/mnt/user/appdata/dash`.
+1. **Create the repository** on GitHub. It can be private. Leave out the README and the
+   license, so the first push goes through.
+2. **Add the Mapbox token as a secret**, before the first push. In the repository, go to
+   **Settings → Secrets and variables → Actions → Secrets → New repository secret**. Use
+   the name `VITE_MAPBOX_TOKEN` and paste the public `pk.…` token as the value, then
+   **Add secret**. The workflow refuses to publish if the secret is missing or is not a
+   `pk.` token.
+3. **Push** from the Mac. `.gitignore` keeps `.env`, `.env.local` and every other `.env*`
+   file except `.env.example` out of the repository.
 
-**Option A: git.** The repo has no remote yet. Push it to a Git host from the Mac first
-(`git remote add origin <url> && git push -u origin main`). Then, on the server (check
-first that `git --version` works there):
+   ```sh
+   git remote add origin https://github.com/<owner>/dash.git
+   git push -u origin main          # after the first commit
+   ```
+
+4. **Watch it run** in the repository's **Actions** tab, under **Publish image**. The job
+   *Lint, test, build* runs first, then *Build and push image*, which takes a few minutes.
+   When the run is green, its summary shows the pushed tags and the digest. To start a run
+   by hand: **Actions → Publish image → Run workflow**.
+5. **Find the image.** The repository's main page lists it under **Packages** in the
+   right-hand sidebar. Each image is tagged `latest` and with its 7-character commit SHA,
+   e.g. `ghcr.io/<owner>/dash:3f9c2ab`.
+
+If *Build and push image* fails with `denied` or `permission_denied`, a package with
+that name already exists and this repository may not write to it. Fix it on the package
+page: **Package settings → Manage Actions access → Add repository**, choose this
+repository, and give it the role **Write**.
+
+### 3.2 Image visibility
+
+A newly published package is **private**, even if the repository is public. Before the
+server can pull it, choose one of two options.
+
+**Make the package public (simplest).** Anyone can then pull it without logging in, so
+`docker pull`, `deploy.sh` and Unraid's Docker tab, including its update check, need no
+credentials. Only the image becomes public. It contains nginx, its config and the built
+static site, which are the same files `https://dash.unserver23.net` sends every
+visitor. It also contains the public Mapbox token, which is in that JavaScript anyway.
+Its labels name the repository and the commit. The source code stays private. To change
+it, open the package page: **Package settings → Danger Zone → Change visibility →
+Public**, then type the package name to confirm. **This is one-way.** GitHub cannot make
+a public package private again. If you use Cloudflare Access (section 4) to keep the
+app private, a public image undoes that, so keep the package private instead.
+
+**Keep it private, and log the server in once.** GHCR accepts only a **personal access
+token (classic)**, not a fine-grained one. Create one with only the **`read:packages`**
+scope: on GitHub, **Settings → Developer settings → Personal access tokens → Tokens
+(classic) → Generate new token (classic)**. Choose an expiration date. Then, on the
+server:
+
+```sh
+docker login ghcr.io -u <github-username>    # paste the token at the Password prompt
+```
+
+Docker stores the login unencrypted in `/root/.docker/config.json`. The trade-offs:
+
+- The server holds one more secret.
+- A `read:packages` token can read every package your account can read, not only this one.
+- When the token expires, or the login is lost, pulls fail with `unauthorized`.
+  `deploy.sh` reports this, and running the login again fixes it.
+- If the Docker tab shows the version of `dash` as *not available*, Unraid's update check
+  cannot see the private package. Update with `deploy.sh` or the commands instead.
+
+### 3.3 First deploy on the server
+
+Open an SSH session to the server (`ssh root@<server-ip>`). Before the first deploy,
+confirm that port **3274** is free. These two commands should print nothing:
+`docker ps --format '{{.Names}} {{.Ports}}' | grep 3274` and `ss -ltn 'sport = :3274'`.
+
+Then use **one** of the three ways below. All three manage the container named `dash`,
+so do not mix them. To switch, remove the container first, with `docker rm -f dash` or
+**Remove** in the Docker tab.
+
+**A. `deploy.sh` (recommended).** It checks health, prints logs on failure, and keeps
+dated images, so a rollback is a single command. It needs only itself: no checkout and
+no `.env`.
+
+```sh
+# On the Mac, from the repo root:
+ssh root@<server-ip> mkdir -p /mnt/user/appdata/dash
+scp deploy.sh root@<server-ip>:/mnt/user/appdata/dash/
+# On the server:
+cd /mnt/user/appdata/dash && chmod +x deploy.sh
+./deploy.sh --image ghcr.io/<owner>/dash
+```
+
+What it does:
+
+1. Pulls `ghcr.io/<owner>/dash:latest`. A tag works too, e.g. `--image …/dash:3f9c2ab`.
+   If the pull fails, the running container is left alone.
+2. Tags the image `dash:<YYYYmmdd-HHMMSS>-<commit sha>` for rollback.
+3. Replaces the `dash` container (`--restart unless-stopped`, `-p 3274:80`).
+4. Waits for `/healthz` and checks that `/` serves the app. On failure it prints the
+   container logs and the rollback command.
+5. Keeps the 5 newest dated images.
+
+If the container already runs that image, `deploy.sh` changes nothing. So running it
+on a schedule (e.g. with the User Scripts plugin) costs only a `docker pull`.
+
+To avoid typing the image each time, save it in a `.env` file next to the script:
+
+```sh
+echo 'DASH_IMAGE=ghcr.io/<owner>/dash' > .env    # from then on: ./deploy.sh
+```
+
+`DASH_PORT` (default 3274) and `DASH_KEEP_IMAGES` (default 5) can go in the same file.
+`./deploy.sh --help` lists every option.
+
+**B. Plain `docker` commands.** These give no health wait and no dated images for
+rollback.
+
+```sh
+docker pull ghcr.io/<owner>/dash:latest
+docker run -d --name dash --restart unless-stopped -p 3274:80 ghcr.io/<owner>/dash:latest
+```
+
+**C. Unraid's Docker tab.** Go to **Docker → Add Container** and fill in:
+
+- **Name:** `dash`
+- **Repository:** `ghcr.io/<owner>/dash:latest`
+- **Network Type:** `Bridge`
+- Click **Add another Path, Port, Variable, Label or Device** and set **Config Type**
+  `Port`, **Name** `HTTP`, **Container Port** `80`, **Host Port** `3274`,
+  **Connection Type** `TCP`. Then click **Add**.
+- Optional, in **Advanced View**: **WebUI** `http://[IP]:[PORT:80]/`
+
+Click **Apply**. Unraid pulls the image and starts the container. Then turn on
+**Auto-Start** for `dash` on the Docker tab; it is Unraid's version of the restart
+policy. This container comes from an Unraid template, so Unraid manages its updates.
+After a new image is published, **Check for Updates** marks `dash` as *update ready*,
+and **apply update** pulls the image and recreates the container (section 8).
+`deploy.sh` refuses to replace a container that was created this way.
+
+### 3.4 Verify
+
+```sh
+curl http://<server-ip>:3274/healthz              # → ok
+curl -sI http://<server-ip>:3274/ | grep -i cache # → Cache-Control: no-cache
+docker ps --filter name=dash                       # STATUS shows "(healthy)" after ~10 s
+```
+
+With way A or B, `dash` appears in Unraid's **Docker** tab without a template (newer
+Unraid versions call this third-party). Update it with `deploy.sh` or the commands, not
+with the tab's update action. After the next reboot, check that it came back up. If it
+did not, turn on **Auto-Start** for `dash` in the Docker tab.
+
+### 3.5 Alternative: build on the server
+
+Use this only to deploy without GitHub Actions. The server then builds the image from a
+copy of the code, and the Mapbox token lives in a `.env` file there. The checkout lives
+at `/mnt/user/appdata/dash`.
+
+**Get the code onto the server. Option A: git.** Clone the GitHub repository (3.1). A
+private repository needs credentials on the server, such as an SSH deploy key. First
+check that `git --version` works on the server.
 
 ```sh
 cd /mnt/user/appdata && git clone <url> dash && cd dash
@@ -96,11 +256,11 @@ rsync -av --delete \
   ./ root@<server-ip>:/mnt/user/appdata/dash/
 ```
 
-`--delete` removes files you deleted locally (stale sources would break the type-check).
+`--delete` removes files you deleted locally; stale sources would break the type-check.
 Excluded paths are never deleted, so the server's `.env` survives. Without a `.git`
 folder, `deploy.sh` skips the pull on its own.
 
-### 3.2 Create `.env` on the server
+**Create `.env` on the server:**
 
 ```sh
 cd /mnt/user/appdata/dash
@@ -113,14 +273,13 @@ chmod 600 .env
 
 - The token is read at **build time** and baked into the JavaScript. Changing it means
   running `./deploy.sh` again.
-- Never commit `.env`. The current `.gitignore` covers `.env.local` but not `.env`.
-  `deploy.sh` warns if `.env` is tracked.
-- **Port:** the default host port is **3274**. Confirm it is free before the first deploy
-  (`docker ps --format '{{.Names}} {{.Ports}}' | grep 3274` and `ss -ltn 'sport = :3274'`
-  should print nothing). To use a different port, set `DASH_PORT` in `.env`. `deploy.sh`
-  refuses a port that is already in use.
+- Do not set `DASH_IMAGE` in this `.env`. With it set, `deploy.sh` pulls instead of
+  building.
+- Never commit `.env`. `.gitignore` excludes it, and `deploy.sh` warns if it is tracked.
+- The port check from 3.3 applies here too. `deploy.sh` refuses a port that is already
+  in use.
 
-### 3.3 Deploy
+**Deploy:**
 
 ```sh
 ./deploy.sh              # or: bash deploy.sh
@@ -139,22 +298,14 @@ It does the following:
 6. Prints the LAN URL and a one-line rollback command, and keeps the 5 newest dated
    images (`DASH_KEEP_IMAGES`).
 
-### 3.4 Verify
-
-```sh
-curl http://<server-ip>:3274/healthz              # → ok
-curl -sI http://<server-ip>:3274/ | grep -i cache # → Cache-Control: no-cache
-docker ps --filter name=dash                       # STATUS shows "(healthy)" after ~10 s
-```
-
-`dash` appears in Unraid's **Docker** tab. It does not come from an Unraid template, so
-redeploy with `./deploy.sh`, not with the tab's update action. After the next reboot, check
-that it came back up. If it did not, turn on **Autostart** for `dash` in the Docker tab.
+Verify as in 3.4.
 
 **Compose instead of `deploy.sh`:** only if the Compose plugin is installed
 (`docker compose version`). Run `docker compose up -d --build`. It reads the same `.env`
 and uses the same container name, so use one method or the other (`docker rm -f dash`
-before switching). Compose keeps no dated images for rollback.
+before switching). Compose keeps no dated images for rollback. A comment at the top of
+`docker-compose.yml` shows how to make Compose run the published image instead of
+building it.
 
 ## 4. Cloudflare Tunnel
 
@@ -226,9 +377,9 @@ Safari Websites**. If a prompt does not come back, remove the app and add it aga
       minute, then come back. The GPS indicator recovers and the speed updates again.
 - [ ] **Day and night:** **Settings → Appearance**. Auto follows the sun at your position
       (the map also goes through dawn and dusk); Day and Night force the look.
-- [ ] **Update after a redeploy:** make a visible change and run `./deploy.sh`. Open the
-      app, wait 10–20 s, close it from the app switcher and open it again. The change is
-      there.
+- [ ] **Update after a redeploy:** make a visible change, push it, and redeploy once the
+      workflow is green (section 8). Open the app, wait 10–20 s, close it from the app
+      switcher and open it again. The change is there.
 - [ ] **Demo:** `https://dash.unserver23.net/?demo=1` in Safari, or Settings → Demo drive,
       runs the simulated drive.
 
@@ -249,27 +400,57 @@ Safari Websites**. If a prompt does not come back, remove the app and add it aga
 
 **Update**
 
-```sh
-# Mac: commit and push (Option A), or rsync the folder again (Option B)
-ssh root@<server-ip>
-cd /mnt/user/appdata/dash && ./deploy.sh
-```
+1. Commit and push to `main` from the Mac.
+2. Wait until the **Publish image** run in the repository's **Actions** tab is green. Its
+   summary lists the new tags.
+3. On the server, update the same way you deployed (3.3):
+
+   ```sh
+   # A: deploy.sh
+   ssh root@<server-ip>
+   cd /mnt/user/appdata/dash && ./deploy.sh --image ghcr.io/<owner>/dash   # or ./deploy.sh with DASH_IMAGE in .env
+
+   # B: plain docker
+   docker pull ghcr.io/<owner>/dash:latest
+   docker rm -f dash
+   docker run -d --name dash --restart unless-stopped -p 3274:80 ghcr.io/<owner>/dash:latest
+   ```
+
+   C (Docker tab): click **Check for Updates**. `dash` then shows *update ready*; click
+   **apply update**. Plugins from Community Applications can also apply updates on a
+   schedule.
 
 Installed phones pick up the new version on their next launch (see the checklist item
-above). Editing `.env` (token or port) also needs `./deploy.sh`.
+above). After a change to `DASH_PORT`, run `./deploy.sh` again; it recreates the
+container even when the image is the same. In pull mode `deploy.sh` does not update
+itself, so after you change it, copy it to the server again with `scp` (3.3). With the
+build-on-server setup (3.5), push or rsync the code, then run `./deploy.sh` in the
+checkout.
 
 **Roll back**
 
 ```sh
-docker image ls dash                         # dated builds, newest first by name
-./deploy.sh --rollback 20261125-131200-abc1234
+docker image ls dash                                 # dated deploys, newest first by name
+./deploy.sh --rollback 20261125-131200-3f9c2ab       # an earlier deploy: no pull, no build
+./deploy.sh --image ghcr.io/<owner>/dash:3f9c2ab     # any commit the workflow ever published
 ```
 
-Every successful deploy prints the exact rollback command for the build it replaced. A
-rollback skips the pull and the build, retags `dash:latest`, and phones pick it up like an
-update. The next plain `./deploy.sh` moves forward again. To undo a bad commit for good,
-revert it in git.
+- Every successful deploy prints the exact `--rollback` command for the build it
+  replaced. The suffix of a dated tag is the commit's short SHA. This works for pulled
+  images and local builds alike.
+- With plain `docker` (B), roll back with the `docker pull` and `docker run` commands
+  above, using the SHA tag instead of `latest`.
+- In the Docker tab (C), **Edit** `dash`, set **Repository** to
+  `ghcr.io/<owner>/dash:3f9c2ab`, then **Apply**. Unraid then stays on that build. Set
+  the repository back to `:latest` to follow `main` again.
 
-**Housekeeping:** Docker data lives in Unraid's fixed-size Docker image file. If it fills
-up, `docker builder prune -f` clears the BuildKit build cache, and `docker image prune -f`
-removes dangling images.
+Phones pick up a rollback like an update. Deploying `:latest` again, or a plain
+`./deploy.sh` in the build setup, moves forward to whatever `main` last produced. To get
+rid of a bad commit for good, revert it in git and push.
+
+**Housekeeping:** Docker data lives in Unraid's fixed-size Docker image file.
+`deploy.sh` keeps only the newest dated images. Images pulled by SHA tag stay until you
+remove them: list them with `docker image ls ghcr.io/<owner>/dash`, then remove them
+with `docker rmi`. `docker image prune -f` removes dangling images, and
+`docker builder prune -f` clears the build cache that the build-on-server setup leaves
+behind.

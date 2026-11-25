@@ -13,11 +13,11 @@ import { isMapEnabled } from './mapInstance';
 
 const FULL = 'Map off — this build has no Mapbox token';
 
-/** Which text fits, by the width of the gap (px, measured with SF Pro Text 13/600). */
+/** Which text fits, by the width of the gap: measured pill width (SF Pro Text 13/600) + 24px. */
 const FITS = {
-  full: 330,
-  medium: 220,
-  short: 110,
+  full: 340,
+  medium: 244,
+  short: 124,
 } as const;
 
 const show = (variant: 'full' | 'medium' | 'short') => ({ [`& [data-variant="${variant}"]`]: { display: 'inline' } });

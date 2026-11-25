@@ -20,17 +20,29 @@
  *   1. a destination is set (new key);
  *   2. `nav.rerouteNonce` is bumped (off-route, retry) (new key);
  *   3. every `ROUTE_REFRESH_MS` (2 min) from the current position, for fresh traffic/ETA
- *      (`refetchInterval`, foreground only) — skipped when there is no fresh fix.
- * NoRoute/NoSegment and 4xx are not retried; network/5xx are retried twice (app default).
+ *      (`refetchInterval`, foreground only) — skipped when there is no fresh fix;
+ *   4. `ROUTE_RETRY_MS` (20 s) after a request failed for a network/server reason (a failed
+ *      reroute must not wait for the 2-minute refresh).
+ * NoRoute/NoSegment and 4xx are not retried; network/5xx/timeouts (`fetchJson`, 10 s) are
+ * retried twice (app default). Worst case while navigating normally: 30 refreshes an hour plus
+ * the reroutes (≤ 4 a minute, backing off to 1 per 2 min); while every request fails, one
+ * attempt (≤ 3 requests) per 20 s.
+ *
+ * CACHE — route queries never expire by themselves (`gcTime: Infinity`); the nav engine prunes
+ * them with `pruneRouteQueries` (other destinations whenever the destination changes, older
+ * reroutes once a newer one loaded). So the last route that loaded for the current destination
+ * stays available (`lastGoodRoute`) to keep guiding while a reroute is pending or has failed.
  */
-import { queryOptions, useQuery, type QueryKey } from '@tanstack/react-query';
+import { queryOptions, useQuery, type QueryClient, type QueryKey } from '@tanstack/react-query';
 import { shouldRetry } from '../state/queryClient';
 import type { LngLat, Place } from '../types';
-import { fetchJson } from './client';
+import { fetchJson, isHttpError } from './client';
 
 export const DIRECTIONS_URL = 'https://api.mapbox.com/directions/v5/mapbox/driving-traffic';
 /** Periodic traffic/ETA refresh while navigating. */
 export const ROUTE_REFRESH_MS = 2 * 60_000;
+/** Retry of a route request that failed for a transient reason (network, timeout, 5xx, 408/429). */
+export const ROUTE_RETRY_MS = 20_000;
 /** Allowed deviation of the origin bearing, degrees (Mapbox recommends 45 or 90). */
 export const ORIGIN_BEARING_TOLERANCE_DEG = 45;
 
@@ -236,6 +248,65 @@ export function routeQueryKey(destination: Place | null, rerouteNonce: number) {
     : ([...ROUTE_QUERY_ROOT, null, null, null, rerouteNonce] as const);
 }
 
+/** `['nav', 'route', id, lat, lng]` — prefix of every reroute of one destination. */
+export function routeDestinationKey(destination: Place) {
+  return [...ROUTE_QUERY_ROOT, destination.id, destination.lat, destination.lng] as const;
+}
+
+/** A route query key belongs to `destination` (same id and coordinates; `null` matches no-destination keys). */
+function keyIsFor(key: QueryKey, destination: Place | null): boolean {
+  if (key[0] !== 'nav' || key[1] !== 'route') return false;
+  if (!destination) return key[2] === null;
+  return key[2] === destination.id && key[3] === destination.lat && key[4] === destination.lng;
+}
+
+/**
+ * The route that most recently loaded for `destination`, under any reroute nonce, or `null`.
+ * While a reroute is in flight or has failed, the engine keeps guiding along this one.
+ */
+export function lastGoodRoute(client: QueryClient, destination: Place | null): RouteResult | null {
+  if (!destination) return null;
+  let best: RouteResult | null = null;
+  let bestAt = -Infinity;
+  for (const query of client.getQueryCache().findAll({ queryKey: routeDestinationKey(destination) })) {
+    const data = query.state.data as RouteResult | undefined;
+    if (data && query.state.dataUpdatedAt > bestAt) {
+      best = data;
+      bestAt = query.state.dataUpdatedAt;
+    }
+  }
+  return best;
+}
+
+/**
+ * Forget route queries nobody observes that are no longer useful: every other destination's
+ * (so A → B → A routes from here, not from where A was first chosen) and — when `keepNonce` is
+ * given (that reroute has loaded) — this destination's older reroutes.
+ */
+export function pruneRouteQueries(client: QueryClient, destination: Place | null, keepNonce?: number): void {
+  client.removeQueries({
+    queryKey: ROUTE_QUERY_ROOT,
+    predicate: (query) => {
+      if (query.getObserversCount() > 0) return false;
+      if (!keyIsFor(query.queryKey, destination)) return true;
+      return keepNonce !== undefined && destination !== null && query.queryKey[5] !== keepNonce;
+    },
+  });
+}
+
+/**
+ * How long until the route query fetches again: the periodic refresh while it has a route; a
+ * quick retry after a transient failure; the slow refresh after a 4xx (bad token, bad input);
+ * never for a destination Directions cannot reach.
+ */
+export function routeRefetchInterval(state: { data?: unknown; error?: unknown; status?: string }): number | false {
+  if (state.data !== undefined) return ROUTE_REFRESH_MS;
+  if (state.status !== 'error') return ROUTE_REFRESH_MS;
+  if (isRouteUnavailable(state.error)) return false;
+  if (isHttpError(state.error) && !shouldRetry(0, state.error)) return ROUTE_REFRESH_MS;
+  return ROUTE_RETRY_MS;
+}
+
 /** Same (non-null) destination in two route query keys (reroute → keep showing the old line meanwhile). */
 export function sameRouteDestination(a: QueryKey, b: QueryKey): boolean {
   return (
@@ -280,9 +351,11 @@ export function routeQueryOptions(args: RouteQueryArgs) {
     enabled: enabled && destination !== null && token !== '',
     // Never refetch on mount/focus/reconnect-while-fresh; only the interval and key changes fetch.
     staleTime: Infinity,
-    gcTime: 5 * 60_000,
-    // Periodic traffic refresh — but do not poll a destination that has no route.
-    refetchInterval: (query) => (!query.state.data && isRouteUnavailable(query.state.error) ? false : ROUTE_REFRESH_MS),
+    // Kept until the engine prunes it (see CACHE above): the last good route must not expire
+    // while a reroute keeps failing.
+    gcTime: Infinity,
+    // Periodic traffic refresh; a quick retry after a failure; never poll an unreachable destination.
+    refetchInterval: (query) => routeRefetchInterval(query.state),
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
     // While rerouting to the same destination keep drawing the old route; never across destinations.

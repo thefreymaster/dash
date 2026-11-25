@@ -10,7 +10,9 @@
  *   - Cancel: the layers fade out, then the source, layers and marker are removed.
  *
  * Everything is applied through `whenMapReady`, so it is safe to call before the map exists
- * and without a token (then nothing is drawn). No React here; the nav engine drives it.
+ * and without a token (then nothing is drawn) — and after it has loaded, when the ready
+ * callback runs synchronously inside `createRouteLayer` (so it subscribes last). No React
+ * here; the nav engine drives it.
  */
 import mapboxgl from 'mapbox-gl';
 import type { GeoJSONSource, Map as MapboxMap, Marker } from 'mapbox-gl';
@@ -92,13 +94,6 @@ export function createRouteLayer(initialTheme: ResolvedTheme): RouteLayer {
   let destination: LngLat | null = null;
   let marker: Marker | null = null;
   let destroyed = false;
-
-  const unsubscribe = whenMapReady((m) => {
-    if (destroyed) return;
-    map = m;
-    applyRoute(pendingDrawIn);
-    applyDestination();
-  });
 
   const hasLayers = (m: MapboxMap) => Boolean(m.getSource(ROUTE_SOURCE_ID));
 
@@ -258,6 +253,15 @@ export function createRouteLayer(initialTheme: ResolvedTheme): RouteLayer {
       leaving.remove();
     }
   }
+
+  // Subscribe LAST: when the map has already loaded, `whenMapReady` runs the callback right
+  // here, synchronously — everything it touches must be initialised by now.
+  const unsubscribe = whenMapReady((m) => {
+    if (destroyed) return;
+    map = m;
+    applyRoute(pendingDrawIn);
+    applyDestination();
+  });
 
   return {
     setRoute(next, options = {}) {

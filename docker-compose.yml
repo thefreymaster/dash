@@ -5,6 +5,17 @@
 # Compose reads VITE_MAPBOX_TOKEN and DASH_PORT from ./.env by itself. This uses the same
 # container name as deploy.sh, so pick one of the two. To switch, run `docker rm -f dash`
 # first. Unlike deploy.sh it keeps no dated images for rollback.
+#
+# To run the image that GitHub Actions publishes instead of building here (README.md,
+# "Deploying to Unraid"), replace the whole `build:` block and the `image:` line below with
+# these two lines, using your GitHub user or organization in lower case:
+#
+#     image: ghcr.io/<owner>/dash:latest
+#     pull_policy: always
+#
+# Then `docker compose up -d` both deploys and updates: it pulls first, and recreates the
+# container only when the image changed. The Mapbox token is already inside that image, so
+# .env then needs at most DASH_PORT. A private package needs `docker login ghcr.io` once.
 name: dash
 
 services:

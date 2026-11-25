@@ -17,7 +17,7 @@
  */
 import { Box } from '@chakra-ui/react';
 import { AnimatePresence } from 'motion/react';
-import { ManeuverBanner, useIsNavigating } from '../../nav';
+import { ManeuverBanner, searchOpen, useIsNavigating } from '../../nav';
 import { RoadName } from '../../road';
 
 /** Speedometer width (224px) + gap: the banner reaches below the strip, beside the speedometer. */
@@ -27,6 +27,9 @@ const BANNER_CLEAR_RIGHT = '156px';
 
 export function TopCenterSlot() {
   const navigating = useIsNavigating();
+  // The road pill opens the destination search; while that sheet is open the pill steps
+  // aside (on narrow phones it would peek out from under the sheet) and returns on close.
+  const searching = searchOpen.use();
   return (
     <Box
       data-slot="top-center"
@@ -52,7 +55,7 @@ export function TopCenterSlot() {
           >
             <ManeuverBanner />
           </Box>
-        ) : (
+        ) : searching ? null : (
           <Box key="road" gridArea="1 / 1" w="full" display="flex" justifyContent="center">
             <RoadName />
           </Box>

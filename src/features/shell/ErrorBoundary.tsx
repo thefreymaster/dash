@@ -27,7 +27,8 @@ export class ErrorBoundary extends Component<{ children?: ReactNode }, { failed:
 
 function CrashCard() {
   return (
-    <Box position="fixed" inset="0" bg="page" display="grid" placeItems="center" pl="var(--hud-l)" pr="var(--hud-r)">
+    // Night palette (`dark` class) whatever the theme: a dark card is the calm one on black.
+    <Box className="dark" position="fixed" inset="0" bg="page" color="text.primary" display="grid" placeItems="center" pl="var(--hud-l)" pr="var(--hud-r)">
       <MotionBox
         role="alertdialog"
         aria-labelledby="dash-crash-title"

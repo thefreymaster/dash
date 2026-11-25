@@ -4,9 +4,10 @@
  * Glass panel (224×200, radius 40) with a 240° round-capped gradient arc and big tabular
  * numerals, transcribed from the mockup's `.w-speed`. Everything per-frame is Motion values:
  *
- *   pose.speedMps ─┐
- *   gaugeSweep ────┼─ target (display unit, max of real speed and boot sweep)
- *   unit factor ───┘        │ useSpring (glide; also glides across a unit switch)
+ *   pose.speedMps ──┐
+ *   pose.speedKnown ┤  (unknown speed → 0 and a dimmed "–", never a remembered number)
+ *   gaugeSweep ─────┼─ target (display unit, max of real speed and boot sweep)
+ *   unit factor ────┘        │ useSpring (glide; also glides across a unit switch)
  *                        display ──┬─ digits (textContent, only when the rounded value changes)
  *                                  ├─ digit scale (shrinks at 3 digits, sprung)
  *                                  └─ arc fraction → stroke-dasharray + opacity
@@ -37,7 +38,10 @@ import {
   arcPath,
   digitScaleFor,
   gaugeFraction,
+  gaugeTarget,
+  readoutLive,
   speedDigits,
+  speedIsLive,
 } from './gauge';
 import { gaugeSweep } from './sweep';
 
@@ -62,9 +66,17 @@ export function Speedometer() {
     fullScale.set(FULL_SCALE[units]);
   }, [units, factor, fullScale]);
 
+  // 1 while the speed is trustworthy (a pose AND `pose.speedKnown`: fresh fix, usable speed).
+  // (Multi-input transforms take numeric values only, so the two flags are mapped first.)
+  const hasPose = useTransform(pose.hasPose, (has): number => (has ? 1 : 0));
+  const speedKnown = useTransform(pose.speedKnown, (k): number => (k ? 1 : 0));
+  const known = useTransform([hasPose, speedKnown], ([has, k]: number[]): number =>
+    speedIsLive(has > 0, k > 0) ? 1 : 0,
+  );
+  // An unknown speed (signal loss, no usable estimate) sends the arc to empty through the spring.
   const target = useTransform(
-    [pose.speedMps, gaugeSweep, factor, fullScale],
-    ([mps, sweep, f, full]: number[]) => Math.max(Math.max(0, mps) * f, sweep * full),
+    [pose.speedMps, known, gaugeSweep, factor, fullScale],
+    ([mps, k, sweep, f, full]: number[]) => gaugeTarget(mps, k > 0, sweep, f, full),
   );
   const display = useSpring(target, SPEED_SPRING);
   const fullSmooth = useSpring(fullScale, SPEED_SPRING);
@@ -72,14 +84,13 @@ export function Speedometer() {
   const dash = useTransform(fraction, arcDasharray);
   const valueOpacity = useTransform(fraction, arcOpacity);
 
-  const ready = useTransform(pose.hasPose, (has): number => (has ? 1 : 0));
-  const digits = useTransform([display, ready, gaugeSweep], ([d, r, sweep]: number[]) =>
-    speedDigits(d, r > 0 || sweep > 0),
-  );
+  const ready = useTransform([known, gaugeSweep], ([k, sweep]: number[]): number => (readoutLive(k > 0, sweep) ? 1 : 0));
+  const digits = useTransform([display, ready], ([d, r]: number[]) => speedDigits(d, r > 0));
   const digitScale = useSpring(useTransform(display, digitScaleFor), SCALE_SPRING);
-  // The placeholder dash before the first fix is dimmed; it fades up when a reading arrives.
+  // No live speed (before the first fix, after signal loss): a dimmed dash, faded in and out
+  // with a spring; on recovery the digits fade up while the reading glides up from 0.
   const digitOpacity = useSpring(
-    useTransform([ready, gaugeSweep], ([r, sweep]: number[]): number => (r > 0 || sweep > 0 ? 1 : 0.4)),
+    useTransform(ready, (r): number => (r > 0 ? 1 : 0.4)),
     SCALE_SPRING,
   );
 

@@ -67,8 +67,8 @@ Agent F · navigation
 
 ## Phase 3 — Polish and ship
 
-- [ ] T30 Animation audit: every state change animated, reduced-motion respected
+- [x] T30 Animation audit: every state change animated, reduced-motion respected
 - [x] T31 Dockerfile, `nginx.conf`, compose file, `deploy.sh`, README runbook
-- [ ] T32 Orchestrator review: code review, build, tests, demo-mode walkthrough in Chrome
+- [x] T32 Orchestrator review: code review, build, tests, demo-mode walkthrough in Chrome
 - [ ] T33 Cloudflare: add tunnel public hostname after user confirms (cf CLI per user's global instruction)
 - [ ] T34 On-device checklist handed to user

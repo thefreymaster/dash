@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { RouteStep } from '../../api/directions';
 import { mphToMps } from '../../lib';
-import { arrivalClock, formatMinutes, nextParked } from './format';
+import type { Fix, Telemetry } from '../../types';
+import { INITIAL_TYPING_LOCK, arrivalClock, formatMinutes, nextTypingLock, type TypingLock } from './format';
 import { maneuverIcon, maneuverPhrase, phraseText } from './maneuver';
 
 const step = (type: string, modifier: string | null, label = 'Elm St', exit: number | null = null): Pick<RouteStep, 'maneuver' | 'label'> => ({
@@ -56,13 +57,45 @@ describe('maneuverPhrase', () => {
 });
 
 describe('parked-only typing', () => {
-  it('locks at 3 mph and unlocks only below 2 mph', () => {
-    expect(nextParked(true, 0)).toBe(true);
-    expect(nextParked(true, mphToMps(2.9))).toBe(true);
-    expect(nextParked(true, mphToMps(3))).toBe(false);
-    expect(nextParked(false, mphToMps(2.5))).toBe(false); // hysteresis
-    expect(nextParked(false, mphToMps(1.9))).toBe(true);
-    expect(nextParked(false, Number.NaN)).toBe(true);
+  const FIX: Fix = { lat: 37.79, lng: -122.39, speedMps: 0, headingDeg: null, accuracyM: 5, timestamp: 1 };
+  type T = Pick<Telemetry, 'status' | 'fix' | 'speedMps' | 'speedKnown'>;
+  const gps = (mph: number, over: Partial<T> = {}): T => ({ status: 'tracking', fix: FIX, speedMps: mphToMps(mph), speedKnown: true, ...over });
+  const parked: TypingLock = { allowed: true, reason: 'parked', seenMoving: false };
+  const moving: TypingLock = { allowed: false, reason: 'moving', seenMoving: true };
+
+  it('locks at 3 mph and unlocks only below 2 mph (trusted GPS speed)', () => {
+    expect(nextTypingLock(parked, gps(0)).allowed).toBe(true);
+    expect(nextTypingLock(parked, gps(2.9)).allowed).toBe(true);
+    expect(nextTypingLock(parked, gps(3))).toEqual({ allowed: false, reason: 'moving', seenMoving: true });
+    expect(nextTypingLock(moving, gps(2.5)).allowed).toBe(false); // hysteresis
+    expect(nextTypingLock(moving, gps(1.9))).toEqual({ allowed: true, reason: 'parked', seenMoving: true });
+    expect(nextTypingLock(parked, gps(0))).toBe(parked); // unchanged → same object
+  });
+
+  it('never treats an unknown speed as parked (regression: NaN / placeholder 0 unlocked typing)', () => {
+    // A placeholder 0 with `speedKnown: false` (no usable speed, or the fix is over 3 s old).
+    expect(nextTypingLock(parked, gps(0, { speedKnown: false }))).toEqual({ allowed: false, reason: 'no-speed', seenMoving: false });
+    expect(nextTypingLock(moving, { ...gps(0), speedMps: Number.NaN, speedKnown: false }).allowed).toBe(false);
+    // Weak or lost GPS after having had fixes (tunnel, garage, signal drop while driving).
+    expect(nextTypingLock(parked, gps(0, { status: 'stale' })).reason).toBe('no-speed');
+    expect(nextTypingLock(parked, gps(0, { status: 'requesting' })).allowed).toBe(false);
+  });
+
+  it('allows typing with no GPS at all yet, unless the vehicle was seen moving this session', () => {
+    const noGps: T = { status: 'requesting', fix: null, speedMps: 0, speedKnown: false };
+    expect(nextTypingLock(INITIAL_TYPING_LOCK, noGps)).toEqual({ allowed: true, reason: 'no-gps', seenMoving: false });
+    expect(nextTypingLock(INITIAL_TYPING_LOCK, { ...noGps, status: 'denied' }).allowed).toBe(true); // parked indoors, GPS refused
+    // Driving, then the position source restarts (no fix again): locked until GPS confirms a stop.
+    let lock = nextTypingLock(INITIAL_TYPING_LOCK, gps(30));
+    expect(lock).toEqual({ allowed: false, reason: 'moving', seenMoving: true });
+    lock = nextTypingLock(lock, noGps);
+    expect(lock).toEqual({ allowed: false, reason: 'no-speed', seenMoving: true });
+    lock = nextTypingLock(lock, gps(0));
+    expect(lock).toEqual({ allowed: true, reason: 'parked', seenMoving: true });
+  });
+
+  it('a speed that is not trusted never marks the vehicle as moving', () => {
+    expect(nextTypingLock(INITIAL_TYPING_LOCK, gps(40, { speedKnown: false })).seenMoving).toBe(false);
   });
 });
 

@@ -8,6 +8,7 @@
  * shared state contract.
  */
 import { STORAGE_PREFIX, loadStored, writeStored } from '../../state';
+import type { Telemetry } from '../../types';
 import type { RestingView } from './camera';
 
 /** localStorage key of the remembered position. */
@@ -49,6 +50,18 @@ export function loadLastPosition(): LastPosition | null {
 
 export function saveLastPosition(position: LastPosition): void {
   writeStored(LAST_POSITION_KEY, position);
+}
+
+/**
+ * Save `position` as where the car really is — unless it is not real: never while the demo
+ * simulator drives (the next real launch would rest over San Francisco and fly in from there),
+ * and not before the current source has produced a fix (after switching from demo to GPS the
+ * pose still shows the simulated car until the first real fix). Returns whether it saved.
+ */
+export function rememberPosition(position: LastPosition, telemetry: Pick<Telemetry, 'source' | 'fix'>): boolean {
+  if (telemetry.source !== 'gps' || telemetry.fix === null) return false;
+  saveLastPosition(position);
+  return true;
 }
 
 /**

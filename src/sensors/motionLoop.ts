@@ -320,7 +320,8 @@ export function step(prev: MotionState, target: MotionTarget, dtS: number): Moti
       hasPose: true,
       lat: tLat,
       lng: tLng,
-      // A snap jumps the position, not the readout: the speed still glides (from 0 on the first fix).
+      // A snap jumps the position, not the readout: the speed keeps gliding from where it was
+      // (e.g. back up from 0 after signal loss). Only the very first fix sets it directly.
       speedMps: prev.hasPose ? prev.speedMps : speed,
       speedKnown,
       headingDeg: heading,
@@ -461,14 +462,17 @@ function onTelemetry(l: Loop, t: Telemetry): void {
 }
 
 function writePose(s: MotionState): void {
-  if (pose.hasPose.get() !== s.hasPose) pose.hasPose.set(s.hasPose);
+  // Values first, flags last: a `hasPose` / `speedKnown` listener that reads the position or
+  // speed must see this frame's values, not the initial zeros (0°, 0° is night at midday).
+  if (s.hasPose) {
+    if (pose.lat.get() !== s.lat) pose.lat.set(s.lat);
+    if (pose.lng.get() !== s.lng) pose.lng.set(s.lng);
+    if (pose.speedMps.get() !== s.speedMps) pose.speedMps.set(s.speedMps);
+    if (pose.headingDeg.get() !== s.headingDeg) pose.headingDeg.set(s.headingDeg);
+    if (pose.accuracyM.get() !== s.accuracyM) pose.accuracyM.set(s.accuracyM);
+  }
   if (pose.speedKnown.get() !== s.speedKnown) pose.speedKnown.set(s.speedKnown);
-  if (!s.hasPose) return;
-  if (pose.lat.get() !== s.lat) pose.lat.set(s.lat);
-  if (pose.lng.get() !== s.lng) pose.lng.set(s.lng);
-  if (pose.speedMps.get() !== s.speedMps) pose.speedMps.set(s.speedMps);
-  if (pose.headingDeg.get() !== s.headingDeg) pose.headingDeg.set(s.headingDeg);
-  if (pose.accuracyM.get() !== s.accuracyM) pose.accuracyM.set(s.accuracyM);
+  if (pose.hasPose.get() !== s.hasPose) pose.hasPose.set(s.hasPose);
 }
 
 function frame(l: Loop): void {

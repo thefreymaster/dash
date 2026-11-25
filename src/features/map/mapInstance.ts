@@ -14,13 +14,13 @@
 import mapboxgl from 'mapbox-gl';
 import type { Map as MapboxMap, MapOptions, StyleSpecification } from 'mapbox-gl';
 import { MAPBOX_TOKEN, hasMapboxToken } from '../../api/client';
-import { pose } from '../../state';
+import { pose, telemetry } from '../../state';
 import { createFollowCamera, restingPadding, type PoseSnapshot } from './camera';
 import { startFrameLoop } from './frameLoop';
 import { attachMapTheme, initialLightPreset } from './mapTheme';
 import { createPuck } from './puck';
 import { createReadyRegistry } from './readyRegistry';
-import { SAVE_INTERVAL_MS, loadLastPosition, restingView, saveLastPosition } from './resting';
+import { SAVE_INTERVAL_MS, loadLastPosition, rememberPosition, restingView } from './resting';
 
 /** Mapbox Standard. */
 export const STANDARD_STYLE_URL = 'mapbox://styles/mapbox/standard';
@@ -157,10 +157,10 @@ function createInstance(host: HTMLElement): Instance {
 
   const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => map.resize());
 
-  // Remember where we are, so the next launch rests over it.
+  // Remember where we are, so the next launch rests over it (real GPS only — never the demo drive).
   let lastSaveMs = Number.NEGATIVE_INFINITY;
   const save = (p: PoseSnapshot) =>
-    saveLastPosition({ lng: p.lng, lat: p.lat, headingDeg: p.headingDeg, savedAt: Date.now() });
+    rememberPosition({ lng: p.lng, lat: p.lat, headingDeg: p.headingDeg, savedAt: Date.now() }, telemetry.get());
   const onPageHide = () => {
     if (pose.hasPose.get()) save(readPose());
   };

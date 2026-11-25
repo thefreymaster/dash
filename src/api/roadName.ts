@@ -22,13 +22,19 @@
  * REQUEST CADENCE (`advanceRoadAnchor`)
  *   The query key is an "anchor" — the fix position/heading at the last lookup — not the live
  *   position. A new anchor (= one request) is taken only when the vehicle has moved
- *   `ROAD_REFETCH_DISTANCE_M` from it, has turned ≥ `ROAD_TURN_DEG` (and moved a little, so
- *   the lookup happens past the intersection), or once a heading becomes known after starting
- *   from rest, or when GPS accuracy has improved a lot. Stopping (heading → null) never
- *   triggers a lookup, so a red light at an intersection cannot flip the name to the cross
- *   street. The anchor is derived inside a `telemetry` selector (≈1 Hz fixes), and the
+ *   `ROAD_REFETCH_DISTANCE_M` from it AND at least `ROAD_REFETCH_MIN_INTERVAL_MS` has passed
+ *   (the road you are on rarely changes name on a straight run, so the rate must not grow with
+ *   speed), has turned ≥ `ROAD_TURN_DEG` (and moved a little, so the lookup happens past the
+ *   intersection; at most every `ROAD_TURN_MIN_INTERVAL_MS`), or once a heading becomes known
+ *   after starting from rest, or when GPS accuracy has improved a lot. Stopping (heading → null)
+ *   never triggers a lookup, so a red light at an intersection cannot flip the name to the
+ *   cross street. The anchor is derived inside a `telemetry` selector (≈1 Hz fixes), and the
  *   selector returns the same object until a new anchor is taken, so `useRoadName` re-renders
  *   only when a lookup is due.
+ *
+ *   Volume: straight driving at any speed above ~19 mph costs one lookup per 15 s — at most
+ *   240 an hour (it was one per 125 m: ~900 an hour at 70 mph); below that, one per 125 m. Each
+ *   turn adds one. Hard ceiling (turn after turn): one per 4 s.
  */
 import { keepPreviousData, queryOptions, skipToken, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { angleDiffDeg, bearingDeg, haversineM } from '../lib';
@@ -48,8 +54,12 @@ export const ROAD_QUERY_RADIUS_M = 35;
 export const ROAD_QUERY_LIMIT = 20;
 /** Travel from the last lookup that triggers the next one, metres. */
 export const ROAD_REFETCH_DISTANCE_M = 125;
+/** …but no sooner than this after the last lookup, ms (caps straight-line driving at 240 lookups an hour). */
+export const ROAD_REFETCH_MIN_INTERVAL_MS = 15_000;
 /** Heading change since the last lookup that counts as a turn onto another road, degrees. */
 export const ROAD_TURN_DEG = 60;
+/** Shortest gap between a lookup and a turn-triggered one, ms (keeps turns responsive, bounds a twisty road). */
+export const ROAD_TURN_MIN_INTERVAL_MS = 4_000;
 /** Minimum travel before a turn or a newly known heading triggers a lookup, metres (be past the intersection). */
 export const ROAD_TURN_MIN_MOVE_M = 20;
 /** Fixes less accurate than this are ignored (coarse Wi-Fi/cell positions at start-up), metres. */
@@ -102,6 +112,8 @@ export interface RoadAnchor {
   headingDeg: number | null;
   /** Accuracy of the fix the anchor was taken from, metres. */
   accuracyM: number;
+  /** Timestamp of that fix, epoch ms (paces the next lookup; not part of the query key). */
+  at: number;
 }
 
 /** One road line near the query point, as parsed from Tilequery. */
@@ -137,6 +149,7 @@ function anchorFrom(fix: NonNullable<Telemetry['fix']>, headingDeg: number | nul
     lng: round5(fix.lng),
     headingDeg: headingDeg === null ? null : Math.round(headingDeg) % 360,
     accuracyM: fix.accuracyM,
+    at: fix.timestamp,
   };
 }
 
@@ -155,8 +168,10 @@ export function advanceRoadAnchor(
   if (!prev) return anchorFrom(fix, heading);
 
   const moved = haversineM([prev.lng, prev.lat], [fix.lng, fix.lat]);
-  if (moved >= ROAD_REFETCH_DISTANCE_M) return anchorFrom(fix, heading);
-  if (heading !== null && moved >= ROAD_TURN_MIN_MOVE_M) {
+  // Fix time since the last lookup (a clock going backwards counts as "long ago").
+  const elapsed = Number.isFinite(prev.at) && fix.timestamp >= prev.at ? fix.timestamp - prev.at : Infinity;
+  if (moved >= ROAD_REFETCH_DISTANCE_M && elapsed >= ROAD_REFETCH_MIN_INTERVAL_MS) return anchorFrom(fix, heading);
+  if (heading !== null && moved >= ROAD_TURN_MIN_MOVE_M && elapsed >= ROAD_TURN_MIN_INTERVAL_MS) {
     if (prev.headingDeg === null) return anchorFrom(fix, heading);
     if (Math.abs(angleDiffDeg(prev.headingDeg, heading)) >= ROAD_TURN_DEG) return anchorFrom(fix, heading);
   }

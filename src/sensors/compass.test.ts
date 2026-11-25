@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { telemetry } from '../state';
 import {
+  COMPASS_MAX_ACCURACY_DEG,
+  COMPASS_RESET_GAP_MS,
   COMPASS_WRITE_INTERVAL_MS,
   compassPermission,
   correctForScreen,
@@ -41,7 +43,20 @@ describe('correctForScreen', () => {
 
 describe('readDeviceHeading', () => {
   it('prefers webkitCompassHeading', () => {
-    expect(readDeviceHeading({ webkitCompassHeading: 123.4, alpha: 10, absolute: true })).toBe(123.4);
+    expect(readDeviceHeading({ webkitCompassHeading: 123.4, webkitCompassAccuracy: 10, alpha: 10, absolute: true })).toBe(
+      123.4,
+    );
+  });
+
+  // Regression (review): `webkitCompassAccuracy` was never read, and WebKit reports heading 0
+  // with accuracy -1 when it has no heading — a placeholder that read as "north".
+  it('ignores iOS readings without a real, good accuracy', () => {
+    expect(readDeviceHeading({ webkitCompassHeading: 0, webkitCompassAccuracy: -1 })).toBeNull();
+    expect(readDeviceHeading({ webkitCompassHeading: 90, webkitCompassAccuracy: COMPASS_MAX_ACCURACY_DEG + 5 })).toBeNull();
+    expect(readDeviceHeading({ webkitCompassHeading: 90 })).toBeNull();
+    expect(readDeviceHeading({ webkitCompassHeading: 90, webkitCompassAccuracy: Number.NaN })).toBeNull();
+    expect(readDeviceHeading({ webkitCompassHeading: 90, webkitCompassAccuracy: 0 })).toBe(90);
+    expect(readDeviceHeading({ webkitCompassHeading: 90, webkitCompassAccuracy: COMPASS_MAX_ACCURACY_DEG })).toBe(90);
   });
 
   it('ignores invalid webkit values and falls back to absolute alpha (counter-clockwise)', () => {
@@ -162,25 +177,62 @@ describe('compass driver', () => {
     telemetry.reset();
   });
 
+  const good = (heading: number) => ({ webkitCompassHeading: heading, webkitCompassAccuracy: 10 });
+
   it('writes the landscape-corrected heading, throttled, and clears it on stop', () => {
     const win = fakeWindow(90);
     let now = 0;
     startCompass({ target: win, now: () => now });
-    win.emit('deviceorientation', { webkitCompassHeading: 270 });
+    win.emit('deviceorientation', good(270));
     expect(telemetry.get().compassDeg).toBe(0);
     expect(getCompassDeg()).toBe(0);
 
     let writes = 0;
     const off = telemetry.subscribe(() => writes++);
-    for (now = 16; now < 1_000; now += 16) win.emit('deviceorientation', { webkitCompassHeading: 300 });
+    for (now = 16; now < 3_000; now += 16) win.emit('deviceorientation', good(300));
     off();
     expect(writes).toBeGreaterThan(0);
-    expect(writes).toBeLessThanOrEqual(4);
+    expect(writes).toBeLessThanOrEqual(3);
     expect(telemetry.get().compassDeg).toBeGreaterThan(20);
 
     stopCompass();
     expect(telemetry.get().compassDeg).toBeNull();
     expect(getCompassDeg()).toBeNull();
     expect(win.count()).toBe(0);
+  });
+
+  // Regression (review): `telemetry.compassDeg` was written up to 4×/s although nothing reads
+  // it; every write re-ran every `telemetry.use` selector and a DOM write in the puck.
+  it('writes telemetry at most once a second while the phone turns, the live value stays per-event', () => {
+    const win = fakeWindow(0);
+    let now = 0;
+    startCompass({ target: win, now: () => now });
+    let writes = 0;
+    const off = telemetry.subscribe(() => writes++);
+    let live = 0;
+    for (now = 0; now <= 10_000; now += 16) {
+      win.emit('deviceorientation', good((now / 10_000) * 180)); // a slow U-turn: 18°/s
+      live = getCompassDeg() ?? Number.NaN;
+    }
+    off();
+    expect(writes).toBeGreaterThan(3);
+    expect(writes).toBeLessThanOrEqual(11);
+    expect(live).toBeGreaterThan(170); // the motion loop still sees every event
+  });
+
+  it('placeholder readings (heading 0, accuracy -1) never become a heading, and the live value lapses', () => {
+    const win = fakeWindow(90);
+    let now = 0;
+    startCompass({ target: win, now: () => now });
+    for (; now < 1_000; now += 16) win.emit('deviceorientation', { webkitCompassHeading: 0, webkitCompassAccuracy: -1 });
+    expect(getCompassDeg()).toBeNull();
+    expect(telemetry.get().compassDeg).toBeNull();
+
+    win.emit('deviceorientation', good(270));
+    expect(getCompassDeg()).toBe(0);
+    // Only bad readings from now on: the last good one expires instead of being trusted forever.
+    const until = now + COMPASS_RESET_GAP_MS + 100;
+    for (now += 16; now < until; now += 16) win.emit('deviceorientation', { webkitCompassHeading: 0, webkitCompassAccuracy: -1 });
+    expect(getCompassDeg()).toBeNull();
   });
 });

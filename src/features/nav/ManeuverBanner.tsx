@@ -3,16 +3,19 @@
  * maneuver's arrow, the distance to it (counting down, in `settings.units`) and the street.
  * Each new maneuver slides in from the right while the old one leaves to the left; the arrow
  * pops. While there is no usable route it explains why (finding route, waiting for GPS,
- * offline, no route + Retry, no token) and shows the arrival moment at the end.
- * Rendered by the top-centre slot while navigating; takes no props.
+ * offline, no route + Retry, no token) and shows the arrival moment at the end. Off the route
+ * it says so ("Off route · Rerouting…", or why the reroute has not come yet) with the maneuver
+ * that no longer applies dimmed. Rendered by the top-centre slot while navigating; takes no
+ * props, and its parts read the nav view themselves.
  */
 import { Box, Flex, Text, chakra } from '@chakra-ui/react';
 import { AnimatePresence, motion } from 'motion/react';
 import type { ReactNode } from 'react';
 import { formatDistanceParts } from '../../lib';
 import { nav, settings } from '../../state';
-import { motionTokens } from '../../theme';
+import { motionTokens, swapTransition } from '../../theme';
 import { GlassWidget } from '../shell/GlassWidget';
+import { Roll } from '../trip/Roll';
 import { maneuverIcon, maneuverPhrase, phraseText, type ManeuverIcon } from './maneuver';
 import { ManeuverGlyph } from './ManeuverIcon';
 import { retryRoute } from './actions';
@@ -20,14 +23,11 @@ import { navView, type RouteStatus } from './navState';
 import { Spinner, WarningGlyph } from './glyphs';
 
 const MotionBox = motion.create(Box);
+const MotionFlex = motion.create(Flex);
 const MotionButton = motion.create(chakra.button);
 
 const swapIn = { opacity: 0, x: 24 };
 const swapOut = { opacity: 0, x: -24 };
-const swapTransition = {
-  x: { duration: 0.55, ease: motionTokens.easeOut },
-  opacity: { duration: 0.45, ease: motionTokens.easeOut },
-};
 
 /** Icon tile: accent gradient for guidance, warning gradient for problems. */
 function IconTile({ tone, swapKey, children }: { tone: 'accent' | 'warning' | 'quiet'; swapKey: string; children: ReactNode }) {
@@ -106,7 +106,7 @@ function ActiveGuidance() {
   const next = navView.use((v) => v.progress?.next ?? null);
   const units = settings.use((s) => s.units);
   const destinationName = nav.use((n) => n.destination?.name ?? null);
-  if (!next) return <Waiting status="routing" />;
+  if (!next) return <Waiting />;
   const icon: ManeuverIcon = maneuverIcon(next.step.maneuver.type, next.step.maneuver.modifier);
   const phrase = maneuverPhrase(next.step, destinationName);
   const dist = formatDistanceParts(next.distanceM, units);
@@ -127,7 +127,8 @@ function ActiveGuidance() {
           letterSpacing="-0.01em"
           aria-label={`In ${dist.value} ${dist.unit}, ${phraseText(phrase)}`}
         >
-          {dist.value}
+          {/* The countdown rolls like the trip numbers (down as the turn gets closer). */}
+          <Roll text={dist.value} order={next.distanceM} />
           <Text as="small" fontSize="16px" fontWeight="600" color="text.secondary" ml="3px">
             {dist.unit}
           </Text>
@@ -159,7 +160,8 @@ const WAITING_COPY: Partial<Record<RouteStatus, { title: string; sub: (dest: str
   offline: { title: 'Waiting for connection…', sub: () => 'The route loads when you’re back online' },
 };
 
-function Waiting({ status }: { status: RouteStatus }) {
+function Waiting() {
+  const status = navView.use((v) => v.status);
   const destinationName = nav.use((n) => n.destination?.name ?? 'destination');
   const copy = WAITING_COPY[status] ?? WAITING_COPY.routing!;
   return (
@@ -175,10 +177,11 @@ function Waiting({ status }: { status: RouteStatus }) {
   );
 }
 
-function Problem({ status }: { status: RouteStatus }) {
+function Problem() {
+  const status = navView.use((v) => v.status);
   const message = navView.use((v) => v.message);
   const title = status === 'no-token' ? 'Directions unavailable' : status === 'no-route' ? 'No route found' : 'Route failed';
-  const sub = status === 'no-token' ? 'Add a Mapbox token to navigate' : (message ?? 'Try again in a moment');
+  const sub = status === 'no-token' ? 'This build has no Mapbox token' : (message ?? 'Try again in a moment');
   return (
     <>
       <IconTile tone="warning" swapKey="warning">
@@ -213,6 +216,26 @@ function Problem({ status }: { status: RouteStatus }) {
   );
 }
 
+/** Off the route: the next maneuver no longer applies (dimmed) while a new route comes. */
+function OffRoute() {
+  const next = navView.use((v) => v.progress?.next ?? null);
+  const message = navView.use((v) => v.message);
+  const icon: ManeuverIcon | null = next ? maneuverIcon(next.step.maneuver.type, next.step.maneuver.modifier) : null;
+  return (
+    <>
+      <MotionBox flex="none" initial={{ opacity: 1 }} animate={{ opacity: 0.4 }} transition={{ duration: 0.6, ease: motionTokens.easeOut }}>
+        <IconTile tone="quiet" swapKey={icon ? `${icon.shape}${icon.mirrored ? 'L' : 'R'}` : 'spinner'}>
+          {icon ? <ManeuverGlyph icon={icon} /> : <Spinner size={30} />}
+        </IconTile>
+      </MotionBox>
+      <SwapText swapKey={message ? 'off-route-failed' : 'off-route'}>
+        <Headline>Off route</Headline>
+        <Subline>{message ? `${message} · retrying…` : 'Rerouting…'}</Subline>
+      </SwapText>
+    </>
+  );
+}
+
 function Arrived() {
   const name = nav.use((n) => n.destination?.name ?? 'your destination');
   return (
@@ -238,28 +261,54 @@ function Arrived() {
   );
 }
 
-function BannerContent({ status }: { status: RouteStatus }) {
+/**
+ * Which of the components below `BannerContent` shows. They are different component trees, so
+ * a change of kind is cross-faded as a whole (within one kind, `IconTile` / `SwapText` animate).
+ */
+function contentKind(status: RouteStatus, hasNext: boolean): string {
   switch (status) {
     case 'active':
+    case 'rerouting':
+      return hasNext ? 'active' : 'waiting';
+    case 'off-route':
+      return 'off-route';
+    case 'arrived':
+      return 'arrived';
+    case 'no-token':
+    case 'no-route':
+    case 'error':
+      return 'problem';
+    default:
+      return 'waiting';
+  }
+}
+
+function BannerContent() {
+  const status = navView.use((v) => v.status);
+  switch (status) {
+    case 'active':
+    case 'rerouting': // back on the previous route while a new one loads: its guidance applies
       return <ActiveGuidance />;
+    case 'off-route':
+      return <OffRoute />;
     case 'arrived':
       return <Arrived />;
     case 'no-token':
     case 'no-route':
     case 'error':
-      return <Problem status={status} />;
+      return <Problem />;
     case 'idle':
     case 'routing':
-    case 'rerouting':
     case 'waiting-gps':
     case 'offline':
     default:
-      return <Waiting status={status} />;
+      return <Waiting />;
   }
 }
 
 export function ManeuverBanner() {
   const status = navView.use((v) => v.status);
+  const hasNext = navView.use((v) => v.progress?.next != null);
   return (
     <GlassWidget
       strong
@@ -276,9 +325,22 @@ export function ManeuverBanner() {
       pr={status === 'no-route' || status === 'error' ? '12px' : '18px'}
       overflow="hidden"
     >
-      <Flex align="center" gap="14px" flex="1" minW="0" h="full">
-        <BannerContent status={status} />
-      </Flex>
+      <AnimatePresence mode="popLayout" initial={false}>
+        <MotionFlex
+          key={contentKind(status, hasNext)}
+          align="center"
+          gap="14px"
+          flex="1"
+          minW="0"
+          h="full"
+          initial={{ opacity: 0, x: 24 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={{ opacity: 0, x: -24 }}
+          transition={swapTransition}
+        >
+          <BannerContent />
+        </MotionFlex>
+      </AnimatePresence>
     </GlassWidget>
   );
 }

@@ -26,8 +26,12 @@
  * that interval doubles with each reroute that did not get us back on the route (15 s → 2 min),
  * so a bad signal cannot spam the Directions API.
  *
- * ARRIVAL: within `ARRIVAL_RADIUS_M` of the destination (or of the route's end — the routed
- * point can be on the road beside a building) and at or below `ARRIVAL_MAX_SPEED_MPS`. Sticky.
+ * ARRIVAL: at or below `ARRIVAL_MAX_SPEED_MPS`, and either at the end of the line (on the route,
+ * within `ARRIVAL_RADIUS_M` of its end ALONG it) or within `ARRIVAL_RADIUS_M` of the destination
+ * or the route's end (the routed point can be on the road beside a building) — the latter only
+ * on the last `ARRIVAL_REMAINING_M` of the route, or after leaving it: crawling past the
+ * destination on the far side of a divided road, with the U-turn still ahead, is not arriving.
+ * Sticky.
  */
 import type { Route, RouteStep } from '../../api/directions';
 import { angleDiffDeg, bearingDeg, cumulativeLengthsM, haversineM, mphToMps, nearestPointOnLine } from '../../lib';
@@ -55,6 +59,12 @@ export const REROUTE_BACKOFF_RESET_MS = 30_000;
 export const ARRIVAL_RADIUS_M = 30;
 /** …at or below this speed, m/s (10 mph). */
 export const ARRIVAL_MAX_SPEED_MPS = mphToMps(10);
+/**
+ * On the route, being near the destination counts only this close to the route's end (along
+ * it), m — about a block, so a route that circles the block to approach from the right side
+ * still arrives, but passing the destination long before the route gets there does not.
+ */
+export const ARRIVAL_REMAINING_M = 200;
 /** Snap window behind the last position (GPS noise, a slight roll back), m. */
 export const SNAP_WINDOW_BACK_M = 60;
 /** Snap window ahead of the last position, plus twice the distance covered since, m. */
@@ -355,7 +365,10 @@ export function trackProgress(
 
   const remainingLineM = Math.max(0, p.lengthM - alongM);
   const toDestination = Math.min(haversineM(point, p.destination), haversineM(point, p.end));
-  const near = toDestination <= ARRIVAL_RADIUS_M || (!offRoute && remainingLineM <= ARRIVAL_RADIUS_M);
+  // Near the destination as the crow flies counts on the last stretch of the route, or off it
+  // (the driver found their own way in); not while the route still has far to go from here.
+  const nearDestination = toDestination <= ARRIVAL_RADIUS_M && (offRoute || remainingLineM <= ARRIVAL_REMAINING_M);
+  const near = nearDestination || (!offRoute && remainingLineM <= ARRIVAL_RADIUS_M);
   const arrived = tracker.arrived || (near && speed <= ARRIVAL_MAX_SPEED_MPS);
 
   const nextTracker: TrackerState = { alongM, at: fix.timestamp, lastPoint: point, offRouteSince, onRouteSince, arrived };

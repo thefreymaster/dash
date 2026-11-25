@@ -11,5 +11,8 @@ export {
   arcPath,
   digitScaleFor,
   gaugeFraction,
+  gaugeTarget,
+  readoutLive,
   speedDigits,
+  speedIsLive,
 } from './gauge';

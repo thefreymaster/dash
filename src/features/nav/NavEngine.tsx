@@ -9,15 +9,20 @@
  *   - draws the route line + destination pin, shows the route overview on a new destination;
  *   - ends navigation by itself after the arrival moment;
  *   - in demo mode only, hands the route to the simulator so the simulated car drives it.
+ *
+ * Decisions (which route to guide along, the status, when a reroute is allowed) are the pure
+ * functions in `engine.ts`. A reroute that is pending or failed never takes the route away:
+ * guidance, progress, the line and arrival continue on the last route that loaded for this
+ * destination, and the failed request retries by itself (`ROUTE_RETRY_MS`).
  */
 import { useEffect, useRef, useState } from 'react';
-import { ROUTE_QUERY_ROOT, isRouteUnavailable, useRoute, type RouteOrigin, type RouteResult } from '../../api/directions';
+import { lastGoodRoute, pruneRouteQueries, useRoute, type RouteOrigin, type RouteResult } from '../../api/directions';
 import { isDemo } from '../../sensors';
 import { simDriveRoute, simReleaseRoute } from '../../sensors/simulator';
 import { nav, queryClient, telemetry, ui } from '../../state';
 import type { Fix, Place, Telemetry } from '../../types';
-import { routeErrorMessage } from './actions';
-import { navView, type RouteStatus } from './navState';
+import { isArrived, mayReroute, routeStatus, shownRoute, type Arrival } from './engine';
+import { navView } from './navState';
 import { showRouteOverview, type Overview } from './overview';
 import { INITIAL_REROUTE_POLICY, decideReroute, initialProgress, prepareRoute, startTracker, trackProgress } from './progress';
 import { createRouteLayer, type RouteLayer } from './routeLayer';
@@ -46,43 +51,49 @@ export function NavEngine() {
   // Stable once the first fix arrives (a stale GPS must not toggle the query on and off).
   const hasFix = telemetry.use((t) => t.fix !== null);
   const source = telemetry.use((t) => t.source);
+  const offRoute = navView.use((v) => v.progress?.offRoute ?? false);
   const token = navToken();
 
-  const [arrivedFor, setArrivedFor] = useState<Place | null>(null);
-  const arrived = destination !== null && arrivedFor === destination;
+  // Arrival belongs to one selection of a destination (destination + nonce), not to the place:
+  // picking the place you just arrived at again starts a new navigation.
+  const [arrival, setArrival] = useState<Arrival | null>(null);
+  const arrived = isArrived(arrival, destination, rerouteNonce);
 
   const query = useRoute({ destination, rerouteNonce, token, getOrigin: currentOrigin, enabled: hasFix && !arrived });
-  const route: RouteResult | null = destination ? (query.data ?? null) : null;
-  const isPlaceholder = query.isPlaceholderData;
+  // Without data of its own (reroute failed, or a retry with no placeholder), guide along the
+  // last route that loaded for this destination.
+  const shown = shownRoute(query, destination && !query.data ? lastGoodRoute(queryClient, destination) : null);
+  const route: RouteResult | null = destination ? shown.route : null;
+  const settled = shown.source === 'current';
 
   // ---- status ---------------------------------------------------------------------------
-  let status: RouteStatus;
-  let message: string | null = null;
-  if (!destination) status = 'idle';
-  else if (arrived) status = 'arrived';
-  else if (!token) status = 'no-token';
-  else if (route) status = isPlaceholder ? 'rerouting' : 'active';
-  else if (query.isError) {
-    status = isRouteUnavailable(query.error) ? 'no-route' : 'error';
-    message = routeErrorMessage(query.error);
-  } else if (!hasFix) status = 'waiting-gps';
-  else if (query.fetchStatus === 'paused') status = 'offline';
-  else status = 'routing';
+  const { status, message } = routeStatus({
+    hasDestination: destination !== null,
+    arrived,
+    hasToken: token !== '',
+    hasFix,
+    shown,
+    offRoute,
+    query,
+  });
 
   useEffect(() => {
     navView.set((v) => (v.status === status && v.message === message ? v : { ...v, status, message }));
   }, [status, message]);
 
-  // Navigation ended: forget its routes, so choosing the same place again routes from HERE
-  // (the cache is keyed without the origin). The disabled no-destination entry stays.
+  // New destination (or none): forget every other destination's routes, so choosing A again
+  // later routes from HERE (the cache is keyed without the origin) — also A → B → A.
   useEffect(() => {
-    if (destination) return;
-    queryClient.removeQueries({ queryKey: ROUTE_QUERY_ROOT, predicate: (q) => q.queryKey[2] !== null });
+    pruneRouteQueries(queryClient, destination);
   }, [destination]);
+  // A reroute loaded: the older ones are not needed as a fallback any more.
+  useEffect(() => {
+    if (destination && settled) pruneRouteQueries(queryClient, destination, rerouteNonce);
+  }, [destination, rerouteNonce, settled]);
 
-  // Reroutes only while a settled, current route is on screen.
+  // Reroutes only while a settled route is on screen and no request is in flight.
   const canRerouteRef = useRef(false);
-  const canReroute = route !== null && !isPlaceholder && !query.isFetching && !arrived;
+  const canReroute = mayReroute(shown, query, arrived);
   useEffect(() => {
     canRerouteRef.current = canReroute;
   }, [canReroute]);
@@ -117,7 +128,7 @@ export function NavEngine() {
       tracker = r.tracker;
       navView.set((v) => ({ ...v, progress: r.progress }));
       if (r.progress.arrived) {
-        setArrivedFor(destination);
+        setArrival({ destination, rerouteNonce: nav.get().rerouteNonce });
         return;
       }
       const decision = decideReroute(policyRef.current, r.progress, t.fix.timestamp, canRerouteRef.current);
@@ -166,11 +177,11 @@ export function NavEngine() {
     }
     if (route === drawnRef.current.route) return;
     // Draw in for a new destination or a reroute; a periodic refresh just swaps the line.
-    const drawIn = !isPlaceholder && drawnRef.current.key !== routeKey;
+    const drawIn = settled && drawnRef.current.key !== routeKey;
     layer.setRoute(route.line, { drawIn });
     layer.setProgress(navView.get().progress?.fraction ?? 0);
-    drawnRef.current = { route, key: isPlaceholder ? drawnRef.current.key : routeKey };
-  }, [route, routeKey, isPlaceholder]);
+    drawnRef.current = { route, key: settled ? routeKey : drawnRef.current.key };
+  }, [route, routeKey, settled]);
 
   useEffect(() => {
     layerRef.current?.setDestination(destination ? [destination.lng, destination.lat] : null);
@@ -185,10 +196,10 @@ export function NavEngine() {
       overviewRef.current = { forDestination: null, overview: null };
       return;
     }
-    if (!route || isPlaceholder || current.forDestination === destination) return;
+    if (!route || !settled || current.forDestination === destination) return;
     current.overview?.cancel(false);
     overviewRef.current = { forDestination: destination, overview: showRouteOverview(route.line) };
-  }, [destination, route, isPlaceholder]);
+  }, [destination, route, settled]);
   useEffect(() => () => overviewRef.current.overview?.cancel(false), []);
 
   // ---- demo mode: the simulated car drives the route --------------------------------------

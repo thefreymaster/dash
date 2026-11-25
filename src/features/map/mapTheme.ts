@@ -6,15 +6,21 @@
  *   settings.themeMode = 'auto'          → `lightPreset(lat, lng, now)` from `lib/sun`
  *                                          (dawn / day / dusk / night) at the current pose
  *
- * Re-evaluated on style load, when the setting changes, when the first pose arrives, when the
- * page becomes visible and once a minute. Only `setConfigProperty` is used — never `setStyle`
- * — so sources and layers added by other features (route line) are untouched.
+ * Re-evaluated on style load, when the setting changes, when the first fix arrives (and the
+ * first after a GPS ↔ demo switch), when the page becomes visible and once a minute. Only
+ * `setConfigProperty` is used — never `setStyle` — so sources and layers added by other
+ * features (route line) are untouched.
+ *
+ * The position comes from the latest `telemetry` fix, NOT from a `pose.hasPose` listener: the
+ * motion loop raises `hasPose` before it writes `pose.lat/lng`, so such a listener read
+ * (0°, 0°) — after dark there in the US afternoon — and the map sat on the `night` preset at
+ * midday until the next minute's re-check.
  *
  * This does not touch `ui.resolvedTheme` (the UI theme); the two read the same sun maths.
  */
 import type { Map as MapboxMap } from 'mapbox-gl';
 import { lightPreset } from '../../lib';
-import { pose, settings } from '../../state';
+import { pose, settings, telemetry } from '../../state';
 import type { LightPreset, ThemeMode } from '../../types';
 
 /** Import id of the Standard style inside `mapbox://styles/mapbox/standard`. */
@@ -29,10 +35,12 @@ export function resolveLightPreset(mode: ThemeMode, position: { lat: number; lng
 }
 
 /**
- * Where the sun maths should look: the live pose, otherwise `fallback` (the remembered
- * position or the resting view's guess).
+ * Where the sun maths should look: the latest fix, else the live pose, otherwise `fallback`
+ * (the remembered position or the resting view's guess).
  */
 export function themePosition(fallback: { lat: number; lng: number }): { lat: number; lng: number } {
+  const fix = telemetry.get().fix;
+  if (fix && Number.isFinite(fix.lat) && Number.isFinite(fix.lng)) return { lat: fix.lat, lng: fix.lng };
   return pose.hasPose.get() ? { lat: pose.lat.get(), lng: pose.lng.get() } : fallback;
 }
 
@@ -78,8 +86,12 @@ export function attachMapTheme(map: MapboxMap, fallback: { lat: number; lng: num
   map.on('style.load', onStyleLoad);
   if (map.isStyleLoaded()) onStyleLoad();
   const unsubscribeSettings = settings.subscribe(apply);
-  const unsubscribePose = pose.hasPose.on('change', (has) => {
-    if (has) apply();
+  // The first fix moves the sun maths from the resting guess to where we really are.
+  let hadFix = telemetry.get().fix !== null;
+  const unsubscribeTelemetry = telemetry.subscribe((t) => {
+    const hasFix = t.fix !== null;
+    if (hasFix && !hadFix) apply();
+    hadFix = hasFix;
   });
   const timer = setInterval(apply, THEME_INTERVAL_MS);
   document.addEventListener('visibilitychange', onVisible);
@@ -87,7 +99,7 @@ export function attachMapTheme(map: MapboxMap, fallback: { lat: number; lng: num
   return () => {
     map.off('style.load', onStyleLoad);
     unsubscribeSettings();
-    unsubscribePose();
+    unsubscribeTelemetry();
     clearInterval(timer);
     document.removeEventListener('visibilitychange', onVisible);
   };

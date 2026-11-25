@@ -1,6 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { restingView, saveLastPosition } from '../features/map/resting';
 import { settings, telemetry, ui } from '../state';
-import { THEME_RECHECK_MS, computeTheme, startThemeController, stopThemeController } from './themeController';
+import {
+  THEME_RECHECK_MS,
+  computeTheme,
+  mapFallbackPosition,
+  startThemeController,
+  stopThemeController,
+} from './themeController';
 import { fakeTimers, makeFix } from './testUtils';
 
 // San Francisco: 2026-06-21 20:00 UTC is 13:00 PDT (day); 2026-06-21 08:00 UTC is 01:00 PDT (night).
@@ -46,15 +53,48 @@ describe('theme controller', () => {
     expect(ui.get().resolvedTheme).toBe('day');
   });
 
-  it('auto: waits for the first fix, then re-checks every minute', () => {
+  it('auto: with no position at all keeps the theme, then follows the first fix and re-checks every minute', () => {
     let now = NIGHT_UTC_MS - 60_000;
     const timers = fakeTimers();
-    startThemeController({ now: () => now, timers });
-    expect(ui.get().resolvedTheme).toBe('day'); // no fix yet: unchanged
+    startThemeController({ now: () => now, timers, fallbackPosition: () => null });
+    expect(ui.get().resolvedTheme).toBe('day'); // nothing known: unchanged
     telemetry.set((t) => ({ ...t, fix: makeFix({ ...SF }) }));
     expect(ui.get().resolvedTheme).toBe('night');
     now = NOON_UTC_MS;
     timers.advance(THEME_RECHECK_MS);
     expect(ui.get().resolvedTheme).toBe('day');
+  });
+
+  // Regression (review): the UI stayed in the day theme until the first fix while the map,
+  // using its fallback position, was already in its night preset — bright glass over a night
+  // map on the Start gate, during boot, and forever if location is denied.
+  it('auto before the first fix uses the map fallback position (night on the Start gate at night)', () => {
+    let now = NIGHT_UTC_MS;
+    const timers = fakeTimers();
+    startThemeController({ now: () => now, timers, fallbackPosition: () => SF });
+    expect(ui.get().resolvedTheme).toBe('night');
+    now = NOON_UTC_MS;
+    timers.advance(THEME_RECHECK_MS);
+    expect(ui.get().resolvedTheme).toBe('day');
+    // A real fix wins over the fallback: midnight in Sydney while the fallback (SF) is at noon.
+    telemetry.set((t) => ({ ...t, fix: makeFix({ lat: -33.87, lng: 151.21 }) }));
+    expect(ui.get().resolvedTheme).toBe('night');
+  });
+});
+
+describe('mapFallbackPosition', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('is the map resting position: the remembered last position, else the time-zone guess', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    });
+    const guess = restingView(null, new Date(NIGHT_UTC_MS).getTimezoneOffset());
+    expect(mapFallbackPosition(NIGHT_UTC_MS)).toEqual({ lat: guess.lat, lng: guess.lng });
+    saveLastPosition({ ...SF, headingDeg: 0, savedAt: 0 });
+    expect(mapFallbackPosition(NIGHT_UTC_MS)).toEqual(SF);
   });
 });

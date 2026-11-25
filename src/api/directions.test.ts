@@ -1,14 +1,19 @@
 import { QueryClient, QueryObserver, environmentManager } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import type { Place } from '../types';
+import { HttpError } from './client';
 import {
   ROUTE_REFRESH_MS,
+  ROUTE_RETRY_MS,
   RouteUnavailableError,
   directionsUrl,
   isRouteUnavailable,
+  lastGoodRoute,
   parseDirections,
+  pruneRouteQueries,
   routeQueryKey,
   routeQueryOptions,
+  routeRefetchInterval,
   sameRouteDestination,
   type RouteOrigin,
   type RouteResult,
@@ -270,6 +275,117 @@ describe('route query', () => {
     await vi.advanceTimersByTimeAsync(58 * 60_000); // an hour in total
     expect(fetchMock).toHaveBeenCalledTimes(1 + 30);
     unsubscribe();
+    client.clear();
+  });
+});
+
+describe('reroute failure and route cache lifecycle', () => {
+  const origin = (point: [number, number] = [-122.395336, 37.796768]): RouteOrigin => ({ point, at: 1000, headingDeg: null, fresh: true });
+  const OTHER: Place = { id: 'dest-2', name: 'Fort Mason', lat: 37.8066, lng: -122.4316 };
+
+  it('a failed reroute leaves the last good route available and retries in 20 s, not 2 min (regression: route + guidance vanished)', async () => {
+    environmentManager.setIsServer(() => false);
+    onTestFinished(() => environmentManager.setIsServer(() => typeof window === 'undefined'));
+    vi.useFakeTimers();
+    let fail = false;
+    const fetchMock = vi.fn(async () => {
+      if (fail) throw new TypeError('Load failed');
+      return new Response(JSON.stringify(DIRECTIONS_RESPONSE), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 10 } } });
+    const options = (rerouteNonce: number) =>
+      routeQueryOptions({ destination: PLACE, rerouteNonce, token: 'pk', getOrigin: () => origin(), enabled: true }) as never;
+    const observer = new QueryObserver<RouteResult>(client, options(0));
+    const unsubscribe = observer.subscribe(() => {});
+    await vi.advanceTimersByTimeAsync(10);
+    const good = observer.getCurrentResult().data!;
+    expect(good).toBeTruthy();
+
+    // Off-route → the engine bumps the nonce; every request for the new key fails.
+    fail = true;
+    observer.setOptions(options(1));
+    expect(observer.getCurrentResult().isPlaceholderData).toBe(true);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(observer.getCurrentResult().status).toBe('error');
+    expect(fetchMock).toHaveBeenCalledTimes(1 + 3); // first route + the reroute and its 2 retries
+    // TanStack on its own: no data at all now (what erased the line and stopped guidance)…
+    expect(observer.getCurrentResult().data).toBeUndefined();
+    // …but the last route that loaded for this destination is still in the cache to guide along.
+    expect(lastGoodRoute(client, PLACE)).toBe(good);
+    expect(lastGoodRoute(client, OTHER)).toBeNull();
+
+    // The failed reroute retries by itself after ROUTE_RETRY_MS (was: the 2-minute refresh).
+    expect(ROUTE_RETRY_MS).toBeGreaterThanOrEqual(15_000);
+    expect(ROUTE_RETRY_MS).toBeLessThanOrEqual(30_000);
+    fail = false;
+    await vi.advanceTimersByTimeAsync(ROUTE_RETRY_MS - 200);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(observer.getCurrentResult().status).toBe('success');
+    expect(observer.getCurrentResult().data).toBeTruthy();
+    unsubscribe();
+    client.clear();
+  });
+
+  it('never garbage-collects a route by itself: the fallback must survive a long outage', () => {
+    expect(routeQueryOptions({ destination: PLACE, rerouteNonce: 0, token: 'pk', getOrigin: () => origin(), enabled: true }).gcTime).toBe(Infinity);
+  });
+
+  it('retry cadence by failure kind', () => {
+    expect(routeRefetchInterval({ data: {}, status: 'success' })).toBe(ROUTE_REFRESH_MS);
+    expect(routeRefetchInterval({ data: {}, status: 'error', error: new TypeError('x') })).toBe(ROUTE_REFRESH_MS);
+    expect(routeRefetchInterval({ status: 'error', error: new TypeError('Load failed') })).toBe(ROUTE_RETRY_MS);
+    expect(routeRefetchInterval({ status: 'error', error: new DOMException('slow', 'TimeoutError') })).toBe(ROUTE_RETRY_MS);
+    expect(routeRefetchInterval({ status: 'error', error: new HttpError(503, '', 'u', '') })).toBe(ROUTE_RETRY_MS);
+    expect(routeRefetchInterval({ status: 'error', error: new HttpError(429, '', 'u', '') })).toBe(ROUTE_RETRY_MS);
+    expect(routeRefetchInterval({ status: 'error', error: new HttpError(401, '', 'u', '') })).toBe(ROUTE_REFRESH_MS);
+    expect(routeRefetchInterval({ status: 'error', error: new RouteUnavailableError('NoRoute') })).toBe(false);
+  });
+
+  it('A → B → A routes from where the car is now, not from A\'s cached origin (regression)', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(DIRECTIONS_RESPONSE), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new QueryClient();
+    let here: [number, number] = [-122.395336, 37.796768];
+    const fetchFor = (destination: Place) =>
+      client.fetchQuery(routeQueryOptions({ destination, rerouteNonce: 0, token: 'pk', getOrigin: () => origin(here), enabled: true }));
+
+    const first = await fetchFor(PLACE);
+    expect(first.origin).toEqual(here);
+    pruneRouteQueries(client, OTHER); // the engine, on every destination change
+    here = [-122.41, 37.8];
+    await fetchFor(OTHER);
+    pruneRouteQueries(client, PLACE);
+    here = [-122.42, 37.805];
+    const again = await fetchFor(PLACE);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(again.origin).toEqual([-122.42, 37.805]);
+    client.clear();
+  });
+
+  it('pruning keeps observed queries, and drops older reroutes once a newer one loaded', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(DIRECTIONS_RESPONSE), { status: 200 })));
+    const client = new QueryClient();
+    const opts = (nonce: number, destination: Place = PLACE) =>
+      routeQueryOptions({ destination, rerouteNonce: nonce, token: 'pk', getOrigin: () => origin(), enabled: true });
+    await client.fetchQuery(opts(0));
+    await client.fetchQuery(opts(1));
+    await client.fetchQuery(opts(0, OTHER));
+    const idle = new QueryObserver(client, routeQueryOptions({ destination: null, rerouteNonce: 1, token: 'pk', getOrigin: () => null, enabled: true }) as never);
+    const off = idle.subscribe(() => {});
+
+    pruneRouteQueries(client, PLACE); // other destination gone, both reroutes of this one kept
+    expect(client.getQueryData(routeQueryKey(OTHER, 0))).toBeUndefined();
+    expect(client.getQueryData(routeQueryKey(PLACE, 0))).toBeDefined();
+    expect(client.getQueryData(routeQueryKey(PLACE, 1))).toBeDefined();
+    expect(client.getQueryCache().find({ queryKey: routeQueryKey(null, 1) })).toBeDefined(); // observed: kept
+
+    pruneRouteQueries(client, PLACE, 1); // reroute 1 loaded: reroute 0 is not needed any more
+    expect(client.getQueryData(routeQueryKey(PLACE, 0))).toBeUndefined();
+    expect(lastGoodRoute(client, PLACE)).toBe(client.getQueryData(routeQueryKey(PLACE, 1)));
+    off();
     client.clear();
   });
 });

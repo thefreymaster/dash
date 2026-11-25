@@ -25,6 +25,7 @@ const ORIGIN = makeFix();
 const target = (over: Partial<MotionTarget> = {}): MotionTarget => ({
   fix: ORIGIN,
   speedMps: 0,
+  speedKnown: true,
   courseDeg: null,
   accelMps2: 0,
   compassDeg: null,
@@ -122,7 +123,14 @@ describe('selectHeadingSource', () => {
     const mid = (COURSE_MIN_SPEED_MPS + COURSE_RELEASE_SPEED_MPS) / 2;
     expect(selectHeadingSource('compass', mid, 90, 45)).toBe('compass');
     expect(selectHeadingSource('course', mid, 90, 45)).toBe('course');
-    expect(selectHeadingSource('course', COURSE_RELEASE_SPEED_MPS - 0.01, 90, 45)).toBe('compass');
+    // Released below the lower threshold — and the course is held, not handed to the compass.
+    expect(selectHeadingSource('course', COURSE_RELEASE_SPEED_MPS - 0.01, 90, 45)).toBe('hold');
+  });
+
+  it('after the first GPS course of the session, a stop holds it instead of using the compass', () => {
+    expect(selectHeadingSource('hold', 0, null, 45, true)).toBe('hold');
+    expect(selectHeadingSource('hold', 0, null, 45, false)).toBe('compass');
+    expect(selectHeadingSource('hold', 10, 90, 45, true)).toBe('course');
   });
 });
 
@@ -256,6 +264,112 @@ describe('step', () => {
   });
 });
 
+describe('step: unknown speed', () => {
+  const cruise = (over: Partial<MotionTarget> = {}) =>
+    target({ fix: { ...ORIGIN, speedMps: 29, headingDeg: 90 }, speedMps: 29, courseDeg: 90, ...over });
+
+  // Regression (review): after signal loss the motion loop kept taking its speed target from
+  // the last telemetry speed (the digits read 65 through a tunnel).
+  it('signal loss: the speed expires with the fix age, eases to 0, and the puck stops advancing', () => {
+    let s = step(INITIAL_MOTION_STATE, cruise({ snap: true }), 0);
+    s = run(s, (t) => cruise({ ageS: t }), 0.5).state; // a moving car between fixes
+    expect(s.speedKnown).toBe(true);
+    expect(s.speedMps).toBe(29);
+
+    // No more fixes: telemetry has not caught up yet (still says known), the age decides.
+    const lost = run(s, (t) => cruise({ ageS: 0.5 + t }), 9.5);
+    const frameAt = (seconds: number) => lost.frames[Math.round((seconds - 0.5) * 60) - 1];
+    expect(frameAt(2.9).speedKnown).toBe(true);
+    expect(frameAt(3.1).speedKnown).toBe(false);
+    expect(frameAt(4.5).speedMps).toBeLessThan(29 * 0.1); // eased towards empty, not held at 29
+    expect(lost.state.speedMps).toBe(0);
+    // Not one metre further after the speed went unknown (dead reckoning had stopped at 1.5 s
+    // and stays frozen), and never backwards.
+    expect(dist(frameAt(3.1), lost.state)).toBeLessThan(0.5);
+    expect(dist(lost.state, ORIGIN)).toBeCloseTo(29 * MAX_EXTRAPOLATION_S, 0);
+
+    // Telemetry catches up (speed 0, unknown): still frozen — no slide back to the old fix.
+    const after = run(lost.state, (t) => cruise({ speedMps: 0, speedKnown: false, ageS: 10 + t }), 3).state;
+    expect(dist(after, lost.state)).toBeLessThan(0.01);
+    expect(after.speedKnown).toBe(false);
+  });
+
+  it('recovery is animated: the readout glides back up from 0, it does not jump', () => {
+    let s = step(INITIAL_MOTION_STATE, cruise({ snap: true }), 0);
+    s = run(s, (t) => cruise({ speedKnown: false, speedMps: 0, ageS: 5 + t }), 6).state;
+    expect(s).toMatchObject({ speedKnown: false, speedMps: 0 });
+    const next = at(ORIGIN, 90, 200, { speedMps: 20, headingDeg: 90, timestamp: 60_000 });
+    const { frames, state } = run(s, (t) => target({ fix: next, speedMps: 20, courseDeg: 90, ageS: t % 1 }), 5);
+    expect(frames[0].speedKnown).toBe(true);
+    expect(frames[0].speedMps).toBeLessThan(2);
+    for (let i = 1; i < frames.length; i++) expect(frames[i].speedMps).toBeGreaterThanOrEqual(frames[i - 1].speedMps);
+    expect(state.speedMps).toBe(20);
+  });
+
+  it('a recovery fix far away snaps the position but still glides the readout', () => {
+    let s = step(INITIAL_MOTION_STATE, cruise({ snap: true }), 0);
+    s = run(s, (t) => cruise({ speedKnown: false, speedMps: 0, ageS: 5 + t }), 6).state;
+    const far = at(ORIGIN, 90, 2_000, { speedMps: 25, headingDeg: 90, timestamp: 90_000 });
+    const snapped = step(s, target({ fix: far, speedMps: 25, courseDeg: 90 }), 1 / 60);
+    expect(dist(snapped, far)).toBeLessThan(1e-6);
+    expect(snapped.speedMps).toBeLessThan(2);
+  });
+
+  it('unknown speed on fresh fixes (garage): no dead reckoning, wander within the accuracy is ignored', () => {
+    const start = step(INITIAL_MOTION_STATE, target({ fix: { ...ORIGIN, accuracyM: 20 }, speedKnown: false }), 0);
+    const jitter = [0, 12, 6, 15, 9, 12];
+    const { frames } = run(
+      start,
+      (t) => {
+        const k = Math.floor(t);
+        const fix = at(ORIGIN, k * 77, jitter[k % jitter.length], { accuracyM: 20, timestamp: k * 1000 });
+        // Even a stale telemetry speed/course must not be used while the speed is unknown.
+        return target({ fix, speedMps: 12, courseDeg: 0, speedKnown: false, ageS: t - k });
+      },
+      6,
+    );
+    for (const f of frames) {
+      expect(f.speedKnown).toBe(false);
+      expect(f.speedMps).toBe(0);
+      expect(dist(f, ORIGIN)).toBeLessThan(1e-6);
+    }
+  });
+});
+
+describe('step: heading at stops', () => {
+  const moving = makeFix({ speedMps: 12, headingDeg: 0, timestamp: 1 });
+  const stopped = { ...moving, speedMps: 0, headingDeg: null, timestamp: 2 };
+
+  // Regression (review): below ~1.5 m/s the heading switched from the GPS course (true north)
+  // to the raw magnetic compass, so the map rotated by the declination (≈13° in SF) at every
+  // red light, plus any mount/car-body interference.
+  it('a stop holds the last GPS course instead of switching to the compass', () => {
+    let s = step(INITIAL_MOTION_STATE, target({ fix: moving, speedMps: 12, courseDeg: 0, compassDeg: 35, snap: true }), 0);
+    expect(s.headingSource).toBe('course');
+    const { frames, state } = run(s, (t) => target({ fix: stopped, speedMps: 0, courseDeg: null, compassDeg: 35, ageS: t }), 30);
+    expect(state.headingSource).toBe('hold');
+    for (const f of frames) expect(f.headingDeg).toBe(0);
+    // Pulling away again follows the course.
+    s = run(state, (t) => target({ fix: { ...moving, timestamp: 40 }, speedMps: 5, courseDeg: 10, compassDeg: 35, ageS: t % 1 }), 4).state;
+    expect(s.headingSource).toBe('course');
+    expect(s.headingDeg).toBeCloseTo(10, 1);
+  });
+
+  it('uses the compass only before the first GPS course (parked at the start)', () => {
+    const { state } = run(step(INITIAL_MOTION_STATE, target({ compassDeg: 200 }), 0), () => target({ compassDeg: 200 }), 6);
+    expect(state.headingSource).toBe('compass');
+    expect(state.headingDeg).toBeCloseTo(200, 1);
+    expect(state.hadCourse).toBe(false);
+  });
+
+  it('losing the speed (signal loss) holds the course too', () => {
+    const s = step(INITIAL_MOTION_STATE, target({ fix: moving, speedMps: 12, courseDeg: 0, compassDeg: 35, snap: true }), 0);
+    const { state } = run(s, (t) => target({ fix: moving, speedMps: 12, courseDeg: 0, compassDeg: 35, ageS: 4 + t }), 5);
+    expect(state.headingSource).toBe('hold');
+    expect(state.headingDeg).toBe(0);
+  });
+});
+
 describe('motion loop driver', () => {
   let callbacks: Map<number, () => void>;
   let nextId: number;
@@ -317,6 +431,46 @@ describe('motion loop driver', () => {
     for (let i = 0; i < 120; i++) tick();
     expect(pose.headingDeg.get()).toBe(0);
     telemetry.set({ ...telemetry.get(), source: 'gps', fix: { ...ORIGIN, timestamp: 1 } });
+    for (let i = 0; i < 300; i++) tick();
+    expect(pose.headingDeg.get()).toBeCloseTo(200, 0);
+  });
+
+  it('pose.speedKnown follows telemetry, expires with the fix age, and is false when not tracking', () => {
+    startMotionLoop({ raf, cancelRaf, now: () => now, doc: null, readCompass: () => null });
+    const moving = { ...ORIGIN, speedMps: 20, headingDeg: 0 };
+    telemetry.set({ ...telemetry.get(), status: 'tracking', fix: moving, speedMps: 20, speedKnown: true, headingDeg: 0 });
+    tick();
+    expect(pose.speedKnown.get()).toBe(true);
+    for (let i = 0; i < 60 * 2.5; i++) tick();
+    expect(pose.speedKnown.get()).toBe(true);
+    for (let i = 0; i < 60; i++) tick(); // the fix is now > 3 s old
+    expect(pose.speedKnown.get()).toBe(false);
+
+    telemetry.set({ ...telemetry.get(), fix: { ...moving, timestamp: 5_000 } }); // fresh fix, known speed
+    tick();
+    expect(pose.speedKnown.get()).toBe(true);
+    telemetry.set({ ...telemetry.get(), status: 'stale' }); // status alone is enough
+    tick();
+    expect(pose.speedKnown.get()).toBe(false);
+    stopMotionLoop();
+    expect(pose.speedKnown.get()).toBe(false);
+  });
+
+  it('forgets the held course after a long time in the background (the compass orients again)', () => {
+    const doc = fakeDoc();
+    startMotionLoop({ raf, cancelRaf, now: () => now, doc, readCompass: () => 200 });
+    const moving = { ...ORIGIN, speedMps: 12, headingDeg: 0 };
+    telemetry.set({ ...telemetry.get(), status: 'tracking', fix: moving, speedMps: 12, speedKnown: true, headingDeg: 0 });
+    tick();
+    const parked = { ...ORIGIN, timestamp: 1_000 };
+    telemetry.set({ ...telemetry.get(), fix: parked, speedMps: 0, headingDeg: null });
+    for (let i = 0; i < 120; i++) tick();
+    expect(pose.headingDeg.get()).toBe(0); // held at the stop
+
+    doc.setVisible(false);
+    now += 120_000;
+    doc.setVisible(true);
+    telemetry.set({ ...telemetry.get(), fix: { ...parked, timestamp: 200_000 } });
     for (let i = 0; i < 300; i++) tick();
     expect(pose.headingDeg.get()).toBeCloseTo(200, 0);
   });

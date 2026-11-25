@@ -5,6 +5,7 @@ import {
   MAX_DERIVE_ACCURACY_M,
   PERMISSION_DENIED,
   POSITION_UNAVAILABLE,
+  SPEED_STALE_AFTER_MS,
   STALE_AFTER_MS,
   TIMEOUT,
   UNKNOWN_ACCURACY_M,
@@ -12,9 +13,12 @@ import {
   checkStale,
   deriveSpeedMps,
   estimateMotion,
+  expireTelemetry,
   ingestFix,
+  ingestPositionError,
   isNewerFix,
   normalizeFix,
+  resetForSource,
   startGeolocation,
   startStaleWatch,
   staleStatus,
@@ -85,11 +89,13 @@ describe('deriveSpeedMps', () => {
 
 describe('estimateMotion', () => {
   const a = makeFix({ timestamp: 10_000 });
+  const UNKNOWN = { speedMps: 0, headingDeg: null, speedKnown: false };
 
   it('prefers the device speed and heading', () => {
     expect(estimateMotion(a, moved(a, 20, 1, { speedMps: 15, headingDeg: 90 }))).toEqual({
       speedMps: 15,
       headingDeg: 90,
+      speedKnown: true,
     });
   });
 
@@ -97,22 +103,95 @@ describe('estimateMotion', () => {
     const est = estimateMotion(a, moved(a, 10, 1));
     expect(est.speedMps).toBeCloseTo(10, 3);
     expect(est.headingDeg).toBeCloseTo(0, 3);
+    expect(est.speedKnown).toBe(true);
   });
 
-  it('clamps crawling speeds to 0 and drops the heading at a stop', () => {
-    expect(estimateMotion(a, moved(a, 0.3, 1))).toEqual({ speedMps: 0, headingDeg: null });
+  it('clamps a crawling device speed to a known 0 and drops the heading at a stop', () => {
     expect(estimateMotion(a, moved(a, 0.2, 1, { speedMps: 0.4, headingDeg: 123 }))).toEqual({
       speedMps: 0,
       headingDeg: null,
+      speedKnown: true,
     });
   });
 
-  it('defaults to 0 when speed is unknown and cannot be derived', () => {
-    expect(estimateMotion(null, a)).toEqual({ speedMps: 0, headingDeg: null });
+  it('is unknown — not 0 — when the device gives no speed and none can be derived', () => {
+    expect(estimateMotion(null, a)).toEqual(UNKNOWN);
+    // A tiny move between accurate fixes: could be parked, could be 5 m/s — we cannot tell.
+    expect(estimateMotion(a, moved(a, 0.3, 1))).toEqual(UNKNOWN);
   });
 
   it('keeps device speed but has no course when the heading is missing and not derivable', () => {
-    expect(estimateMotion(null, makeFix({ speedMps: 8 }))).toEqual({ speedMps: 8, headingDeg: null });
+    expect(estimateMotion(null, makeFix({ speedMps: 8 }))).toEqual({ speedMps: 8, headingDeg: null, speedKnown: true });
+  });
+
+  // Regression (review): two null-speed fixes 12 m apart with 20 m accuracy derived 12 m/s
+  // (27 mph) while parked in a garage — moving the puck and flipping the map.
+  it('no phantom speed from position jitter: displacement within the accuracy is unknown, not motion', () => {
+    const p = makeFix({ accuracyM: 20, timestamp: 10_000 });
+    const jitter = moved(p, 12, 1, { accuracyM: 20 });
+    expect(deriveSpeedMps(p, jitter)).toBeNull();
+    expect(estimateMotion(p, jitter)).toEqual(UNKNOWN);
+    // The course is not derived from noise either, even when the device gives a speed.
+    expect(estimateMotion(p, moved(p, 12, 1, { accuracyM: 20, speedMps: 6 }))).toEqual({
+      speedMps: 6,
+      headingDeg: null,
+      speedKnown: true,
+    });
+    // Clearly beyond the noise: real motion.
+    const est = estimateMotion(p, moved(p, 30, 1, { accuracyM: 20 }));
+    expect(est.speedKnown).toBe(true);
+    expect(est.speedMps).toBeCloseTo(30, 3);
+    expect(est.headingDeg).toBeCloseTo(0, 3);
+  });
+});
+
+describe('speed validity over time (expireTelemetry / checkStale)', () => {
+  const T0 = 1_700_000_000_000;
+  const cruising = makeFix({ speedMps: 29, headingDeg: 90, accuracyM: 5, timestamp: T0 });
+
+  beforeEach(() => resetForSource('gps', 'requesting'));
+  afterEach(() => telemetry.reset());
+
+  // Regression (review): after signal loss `telemetry.speedMps` kept the last value forever
+  // (tunnel → the big digits still read 65); `checkStale` only changed the status.
+  it('the speed expires ~3 s after the last fix, before the status goes stale', () => {
+    ingestFix(cruising, T0);
+    expect(telemetry.get()).toMatchObject({ status: 'tracking', speedMps: 29, speedKnown: true });
+
+    checkStale(T0 + SPEED_STALE_AFTER_MS - 1);
+    expect(telemetry.get()).toMatchObject({ speedMps: 29, speedKnown: true });
+
+    checkStale(T0 + SPEED_STALE_AFTER_MS);
+    expect(telemetry.get()).toMatchObject({ status: 'tracking', speedMps: 0, speedKnown: false });
+
+    checkStale(T0 + 120_000);
+    expect(telemetry.get()).toMatchObject({ status: 'stale', speedMps: 0, speedKnown: false });
+
+    // Recovery: the next fix with a speed makes it known again.
+    ingestFix({ ...cruising, timestamp: T0 + 121_000 }, T0 + 121_000);
+    expect(telemetry.get()).toMatchObject({ status: 'tracking', speedMps: 29, speedKnown: true });
+  });
+
+  it('a position error that leaves `tracking` drops the speed at once', () => {
+    ingestFix(cruising, T0);
+    ingestPositionError(POSITION_UNAVAILABLE);
+    expect(telemetry.get()).toMatchObject({ status: 'stale', speedMps: 0, speedKnown: false });
+  });
+
+  it('expireTelemetry is pure and returns the same object when nothing changes', () => {
+    const t = { ...telemetry.initial, status: 'tracking' as const, fix: cruising, speedMps: 29, speedKnown: true };
+    expect(expireTelemetry(t, T0, T0 + 1_000)).toBe(t);
+    expect(expireTelemetry(t, null, T0 + 60_000)).toBe(t);
+    expect(expireTelemetry(t, T0, T0 + SPEED_STALE_AFTER_MS)).toMatchObject({ speedKnown: false, speedMps: 0 });
+    const lost = { ...t, status: 'stale' as const, speedKnown: false, speedMps: 0 };
+    expect(expireTelemetry(lost, T0, T0 + 60_000)).toBe(lost);
+  });
+
+  it('starts unknown, and a source reset makes it unknown again', () => {
+    expect(telemetry.initial.speedKnown).toBe(false);
+    ingestFix(cruising, T0);
+    resetForSource('sim');
+    expect(telemetry.get()).toMatchObject({ speedKnown: false, speedMps: 0, fix: null });
   });
 });
 
@@ -232,6 +311,16 @@ describe('GPS watcher (fake geolocation)', () => {
     active().ok(raw({ latitude: b.lat, longitude: b.lng }, b.timestamp));
     expect(telemetry.get().speedMps).toBeCloseTo(15, 2);
     expect(telemetry.get().headingDeg).toBeCloseTo(0, 2);
+    expect(telemetry.get().speedKnown).toBe(true);
+  });
+
+  it('parked in a garage on jittery Wi-Fi fixes: speed unknown, not 27 mph', () => {
+    startGeolocation({ geolocation: geo, doc: null });
+    const a = makeFix({ timestamp: 10_000 });
+    const b = moved(a, 12, 1);
+    active().ok(raw({ latitude: a.lat, longitude: a.lng, accuracy: 20 }, a.timestamp));
+    active().ok(raw({ latitude: b.lat, longitude: b.lng, accuracy: 20 }, b.timestamp));
+    expect(telemetry.get()).toMatchObject({ status: 'tracking', speedMps: 0, speedKnown: false, headingDeg: null });
   });
 
   it('ingestFix ignores duplicates; checkStale uses receipt time', () => {

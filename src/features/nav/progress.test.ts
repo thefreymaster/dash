@@ -348,6 +348,40 @@ describe('arrival', () => {
     expect(parked.progress.arrived).toBe(true);
   });
 
+  it('crawling past the destination on the far side of a divided road, U-turn still ahead, is not arriving (regression)', () => {
+    // East 300 m on the north carriageway, U-turn across a 25 m median, back west 150 m to the
+    // destination on the south side. At 150 m along, the destination is 25 m away, and the car
+    // crawls in traffic — but 325 m of route are still to go.
+    const divided = makeRoute([
+      [90, 300],
+      [180, 25],
+      [270, 150],
+    ]);
+    const dest = divided.line[divided.line.length - 1];
+    const dp = prepareRoute(divided, dest);
+    const tracker: TrackerState = { ...startTracker({ originAt: T0 }), alongM: 148, at: T0 };
+    const passing = trackProgress(dp, tracker, fixAt(pointOn(dp, 150).point, T0 + 1000, { speedMps: 1.5, headingDeg: 90 }));
+    expect(passing.progress.alongM).toBeCloseTo(150, -1);
+    expect(haversineM(pointOn(dp, 150).point, dest)).toBeLessThan(30);
+    expect(passing.progress.offRoute).toBe(false);
+    expect(passing.progress.arrived).toBe(false);
+    // Driving on round the U-turn and back: arrives at the end as usual.
+    const fixes = [];
+    for (let s = 1; s <= 33; s++) fixes.push(fixAt(pointOn(dp, 150 + s * 10).point, T0 + (1 + s) * 1000, { speedMps: s < 30 ? 10 : 2 }));
+    const { progress } = run(dp, fixes, passing.tracker);
+    expect(progress[progress.length - 1].arrived).toBe(true);
+  });
+
+  it('off the route, reaching the destination your own way still counts', () => {
+    const tracker: TrackerState = { ...startTracker({ originAt: T0 }), alongM: 300, at: T0, lastPoint: pointOn(p, 300).point };
+    // 60 m west of the route's end, i.e. well off the line, next to the destination.
+    const building = destinationPoint(L_DEST, 270, 60);
+    const q = prepareRoute(L_ROUTE, building);
+    const r = trackProgress(q, tracker, fixAt(destinationPoint(building, 0, 8), T0 + 1000, { speedMps: 0 }));
+    expect(r.progress.offRoute).toBe(true);
+    expect(r.progress.arrived).toBe(true);
+  });
+
   it('stops tracking time and distance at a full stop on arrival', () => {
     const fixes = [];
     for (let s = 1; s <= 100; s++) {

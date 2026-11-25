@@ -76,7 +76,11 @@ export interface Telemetry {
   speedKnown: boolean;
   /** Best current course over ground, degrees [0, 360). `null` when stationary/unknown. */
   headingDeg: number | null;
-  /** Device compass heading corrected for landscape orientation, degrees [0, 360). `null` without permission/sensor. */
+  /**
+   * Device compass heading corrected for landscape orientation, degrees [0, 360), MAGNETIC
+   * north. A low-rate snapshot (≤ 1 update/s, only on a ≥ 5° change) — the motion loop reads
+   * the live value from the compass module instead. `null` without permission/sensor.
+   */
   compassDeg: number | null;
 }
 

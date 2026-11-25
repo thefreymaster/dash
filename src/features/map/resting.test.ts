@@ -5,6 +5,7 @@ import {
   RESTING_NEAR,
   loadLastPosition,
   parseLastPosition,
+  rememberPosition,
   restingView,
   saveLastPosition,
 } from './resting';
@@ -58,5 +59,18 @@ describe('save / load', () => {
   it('ignores corrupt storage', () => {
     store.set(LAST_POSITION_KEY, '{not json');
     expect(loadLastPosition()).toBeNull();
+  });
+
+  it('never remembers the demo drive as the real last position (regression: next launch rested over SF)', () => {
+    const fix = { lat: 37.79, lng: -122.39, speedMps: 10, headingDeg: 0, accuracyM: 5, timestamp: 1 };
+    const sf = { lng: -122.39, lat: 37.79, headingDeg: 90, savedAt: 5 };
+    expect(rememberPosition(sf, { source: 'sim', fix })).toBe(false);
+    expect(store.has(LAST_POSITION_KEY)).toBe(false);
+    // Just switched to GPS: the pose still shows the simulated car until the first real fix.
+    expect(rememberPosition(sf, { source: 'gps', fix: null })).toBe(false);
+    expect(store.has(LAST_POSITION_KEY)).toBe(false);
+    const home = { lng: 2.35, lat: 48.86, headingDeg: 45, savedAt: 9 };
+    expect(rememberPosition(home, { source: 'gps', fix: { ...fix, lat: 48.86, lng: 2.35 } })).toBe(true);
+    expect(loadLastPosition()).toEqual(home);
   });
 });

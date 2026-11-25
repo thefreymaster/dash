@@ -7,6 +7,8 @@ import {
   ROAD_MAX_ACCURACY_M,
   ROAD_NAME_ROOT,
   ROAD_REFETCH_DISTANCE_M,
+  ROAD_REFETCH_MIN_INTERVAL_MS,
+  ROAD_TURN_MIN_INTERVAL_MS,
   advanceRoadAnchor,
   createRoadAnchorSelector,
   fetchRoadName,
@@ -91,6 +93,7 @@ const anchorAt = (headingDeg: number | null, at: LngLat = HOME): RoadAnchor => (
   lat: at[1],
   headingDeg,
   accuracyM: 5,
+  at: 0,
 });
 
 describe('parseRoadCandidates', () => {
@@ -216,55 +219,92 @@ describe('roadNameUrl / fetchRoadName', () => {
 // Anchor / request cadence
 // ---------------------------------------------------------------------------
 
-function sample(at: LngLat, headingDeg: number | null, accuracyM = 5): Pick<Telemetry, 'fix' | 'headingDeg'> {
-  const fix: Fix = { lng: at[0], lat: at[1], speedMps: headingDeg === null ? 0 : 12, headingDeg, accuracyM, timestamp: 0 };
+function sample(at: LngLat, headingDeg: number | null, accuracyM = 5, timestamp = 0): Pick<Telemetry, 'fix' | 'headingDeg'> {
+  const fix: Fix = { lng: at[0], lat: at[1], speedMps: headingDeg === null ? 0 : 12, headingDeg, accuracyM, timestamp };
   return { fix, headingDeg };
 }
 const ahead = (m: number, bearing = 0): LngLat => destinationPoint(HOME, bearing, m);
+const T0 = 1_700_000_000_000;
 
 describe('advanceRoadAnchor', () => {
   it('waits for the first usable fix', () => {
     expect(advanceRoadAnchor(null, { fix: null, headingDeg: null })).toBeNull();
     expect(advanceRoadAnchor(null, sample(HOME, 0, ROAD_MAX_ACCURACY_M + 1))).toBeNull();
-    const first = advanceRoadAnchor(null, sample(HOME, 12.4));
-    expect(first).toEqual({ lat: 37.7749, lng: -122.4194, headingDeg: 12, accuracyM: 5 });
+    const first = advanceRoadAnchor(null, sample(HOME, 12.4, 5, T0));
+    expect(first).toEqual({ lat: 37.7749, lng: -122.4194, headingDeg: 12, accuracyM: 5, at: T0 });
   });
 
   it('keeps the same anchor (same reference) until the vehicle has travelled far enough', () => {
-    const first = advanceRoadAnchor(null, sample(HOME, 0))!;
+    // 5 m/s (city): distance is what paces the lookups.
+    const first = advanceRoadAnchor(null, sample(HOME, 0, 5, T0))!;
     let a = first;
     for (let m = 10; m < ROAD_REFETCH_DISTANCE_M; m += 10) {
-      a = advanceRoadAnchor(a, sample(ahead(m), m % 20 === 0 ? 8 : 352))!; // weaving ±8°
+      a = advanceRoadAnchor(a, sample(ahead(m), m % 20 === 0 ? 8 : 352, 5, T0 + m * 200))!; // weaving ±8°
       expect(a).toBe(first);
     }
-    const next = advanceRoadAnchor(a, sample(ahead(ROAD_REFETCH_DISTANCE_M + 2), 0))!;
+    const next = advanceRoadAnchor(a, sample(ahead(ROAD_REFETCH_DISTANCE_M + 2), 0, 5, T0 + 25_400))!;
     expect(next).not.toBe(first);
     expect(next.lat).toBeGreaterThan(first.lat);
   });
 
+  it('at highway speed waits for the time floor too (regression: the rate grew with speed)', () => {
+    const first = advanceRoadAnchor(null, sample(HOME, 0, 5, T0))!;
+    // 31 m/s (70 mph): 125 m is passed after 4 s, but the next lookup waits for 15 s.
+    let a = first;
+    for (let s = 1; s * 1000 < ROAD_REFETCH_MIN_INTERVAL_MS; s++) {
+      a = advanceRoadAnchor(a, sample(ahead(31 * s), 0, 5, T0 + s * 1000))!;
+      expect(a).toBe(first);
+    }
+    const next = advanceRoadAnchor(a, sample(ahead(31 * 15), 0, 5, T0 + ROAD_REFETCH_MIN_INTERVAL_MS))!;
+    expect(next).not.toBe(first);
+  });
+
+  it('bounds an hour of straight driving: ≤ 240 lookups at 70 mph (was ~900), one per 125 m when slow', () => {
+    const lookupsPerHour = (speedMps: number) => {
+      let anchor = advanceRoadAnchor(null, sample(HOME, 90, 5, T0))!;
+      let count = 1;
+      for (let s = 1; s <= 3600; s++) {
+        const next = advanceRoadAnchor(anchor, sample(destinationPoint(HOME, 90, speedMps * s), 90, 5, T0 + s * 1000))!;
+        if (next !== anchor) count++;
+        anchor = next;
+      }
+      return count;
+    };
+    expect(lookupsPerHour(31.3)).toBeLessThanOrEqual(3_600_000 / ROAD_REFETCH_MIN_INTERVAL_MS + 1);
+    expect(lookupsPerHour(31.3)).toBeGreaterThan(200);
+    expect(lookupsPerHour(5)).toBeLessThanOrEqual((5 * 3600) / ROAD_REFETCH_DISTANCE_M + 1);
+    expect(lookupsPerHour(5)).toBeGreaterThan(130);
+  });
+
   it('never re-anchors while stopped, even with GPS jitter and a lost heading', () => {
-    const first = advanceRoadAnchor(null, sample(HOME, 90))!;
-    expect(advanceRoadAnchor(first, sample(ahead(6, 45), null))).toBe(first);
-    expect(advanceRoadAnchor(first, sample(ahead(9, 200), null))).toBe(first);
+    const first = advanceRoadAnchor(null, sample(HOME, 90, 5, T0))!;
+    expect(advanceRoadAnchor(first, sample(ahead(6, 45), null, 5, T0 + 60_000))).toBe(first);
+    expect(advanceRoadAnchor(first, sample(ahead(9, 200), null, 5, T0 + 120_000))).toBe(first);
   });
 
   it('re-anchors after a turn once past the intersection', () => {
-    const first = advanceRoadAnchor(null, sample(HOME, 0))!;
+    const first = advanceRoadAnchor(null, sample(HOME, 0, 5, T0))!;
     // Mid-turn, still in the intersection: not yet.
-    expect(advanceRoadAnchor(first, sample(ahead(12, 45), 75))).toBe(first);
+    expect(advanceRoadAnchor(first, sample(ahead(12, 45), 75, 5, T0 + 6_000))).toBe(first);
     // Turned 90° and 25 m on: new lookup with the new heading.
-    const turned = advanceRoadAnchor(first, sample(ahead(25, 60), 90))!;
+    const turned = advanceRoadAnchor(first, sample(ahead(25, 60), 90, 5, T0 + 8_000))!;
     expect(turned).not.toBe(first);
     expect(turned.headingDeg).toBe(90);
     // A gentle curve does not count as a turn.
-    expect(advanceRoadAnchor(first, sample(ahead(40, 10), 35))).toBe(first);
+    expect(advanceRoadAnchor(first, sample(ahead(40, 10), 35, 5, T0 + 8_000))).toBe(first);
+  });
+
+  it('a turn right after a lookup waits only briefly', () => {
+    const first = advanceRoadAnchor(null, sample(HOME, 0, 5, T0))!;
+    expect(advanceRoadAnchor(first, sample(ahead(25, 60), 90, 5, T0 + ROAD_TURN_MIN_INTERVAL_MS - 1000))).toBe(first);
+    expect(advanceRoadAnchor(first, sample(ahead(30, 60), 90, 5, T0 + ROAD_TURN_MIN_INTERVAL_MS))?.headingDeg).toBe(90);
   });
 
   it('re-anchors once a heading is known after starting from rest', () => {
-    const parked = advanceRoadAnchor(null, sample(HOME, null))!;
+    const parked = advanceRoadAnchor(null, sample(HOME, null, 5, T0))!;
     expect(parked.headingDeg).toBeNull();
-    expect(advanceRoadAnchor(parked, sample(ahead(8), 0))).toBe(parked);
-    expect(advanceRoadAnchor(parked, sample(ahead(22), 0))?.headingDeg).toBe(0);
+    expect(advanceRoadAnchor(parked, sample(ahead(8), 0, 5, T0 + 30_000))).toBe(parked);
+    expect(advanceRoadAnchor(parked, sample(ahead(22), 0, 5, T0 + 32_000))?.headingDeg).toBe(0);
   });
 
   it('re-anchors when a coarse start-up fix is followed by a much better one', () => {
@@ -277,9 +317,9 @@ describe('advanceRoadAnchor', () => {
   });
 
   it('keeps the anchor when fixes disappear or are coarse', () => {
-    const first = advanceRoadAnchor(null, sample(HOME, 0))!;
+    const first = advanceRoadAnchor(null, sample(HOME, 0, 5, T0))!;
     expect(advanceRoadAnchor(first, { fix: null, headingDeg: null })).toBe(first);
-    expect(advanceRoadAnchor(first, sample(ahead(500), 0, 300))).toBe(first);
+    expect(advanceRoadAnchor(first, sample(ahead(500), 0, 300, T0 + 60_000))).toBe(first);
   });
 });
 
@@ -288,18 +328,19 @@ describe('createRoadAnchorSelector', () => {
     status: 'tracking',
     source: 'gps',
     speedMps: 12,
+    speedKnown: true,
     compassDeg: null,
     ...s,
   });
 
   it('only changes its result when a lookup is due, and is idempotent', () => {
     const select = createRoadAnchorSelector();
-    const a = select(telem(sample(HOME, 0)));
-    expect(select(telem(sample(HOME, 0)))).toBe(a);
-    expect(select(telem(sample(ahead(60), 0)))).toBe(a);
-    const b = select(telem(sample(ahead(130), 0)));
+    const a = select(telem(sample(HOME, 0, 5, T0)));
+    expect(select(telem(sample(HOME, 0, 5, T0)))).toBe(a);
+    expect(select(telem(sample(ahead(60), 0, 5, T0 + 5_000)))).toBe(a);
+    const b = select(telem(sample(ahead(130), 0, 5, T0 + 16_000)));
     expect(b).not.toBe(a);
-    expect(select(telem(sample(ahead(130), 0)))).toBe(b);
+    expect(select(telem(sample(ahead(130), 0, 5, T0 + 16_000)))).toBe(b);
   });
 });
 

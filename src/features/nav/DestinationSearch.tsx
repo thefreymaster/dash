@@ -5,8 +5,11 @@
  * visual viewport, which shrinks while the keyboard is up.
  *
  *   PARKED (< 3 mph)  search field + Suggestions (Search Box API, debounced, one billing
- *                     session per opening) beside Recent.
+ *                     session per opening, searched around where the sheet was opened) beside Recent.
  *   MOVING            no typing: the field is locked and says why; recents only, one tap to go.
+ *   Typing needs the GPS to CONFIRM a stop (tracking, trusted speed below 3 mph) — an unknown
+ *   speed locks it too — except before any position at all if the car was never seen moving
+ *   (`typingLock` in `navState.ts`, rule in `format.ts`).
  *
  * Choosing a place sets `nav.destination`, records it in `recents` (`addRecent`) and closes
  * the sheet. Empty, loading, error, no-results and no-token states are all drawn.
@@ -23,12 +26,13 @@ import {
   type Suggestion,
 } from '../../api/search';
 import { formatDistance, haversineM } from '../../lib';
-import { addRecent, nav, recents, settings, telemetry } from '../../state';
+import { recents, settings, telemetry } from '../../state';
 import { motionTokens } from '../../theme';
 import type { LngLat, Place } from '../../types';
-import { nextParked } from './format';
+import { navigateTo } from './actions';
+import type { TypingReason } from './format';
 import { InfoGlyph, KindGlyph, LockGlyph, ParkedGlyph, RecentGlyph, SearchGlyph, Spinner, WarningGlyph, CloseGlyph } from './glyphs';
-import { closeSearchSheet, searchOpen, searchSession } from './navState';
+import { closeSearchSheet, searchOpen, searchOrigin, searchSession, typingLock } from './navState';
 import { navToken } from './token';
 import { useVisualViewport } from './useVisualViewport';
 
@@ -44,11 +48,9 @@ const ROW_H = '46px';
 // Hooks
 // ---------------------------------------------------------------------------
 
-/** Parked/moving with hysteresis (see `nextParked`), from `telemetry.speedMps` (~1 Hz). */
+/** Typing allowed now (the parked-only rule with hysteresis, kept by `navState` from telemetry). */
 function useParked(): boolean {
-  const [parked, setParked] = useState(() => nextParked(true, telemetry.get().speedMps));
-  useEffect(() => telemetry.subscribe((t) => setParked((p) => nextParked(p, t.speedMps))), []);
-  return parked;
+  return typingLock.use((l) => l.allowed);
 }
 
 function useDebounced<T>(value: T, ms: number): T {
@@ -60,17 +62,33 @@ function useDebounced<T>(value: T, ms: number): T {
   return debounced;
 }
 
-/** Current position as `[lng, lat]` (rounded upstream for the cache key), or `null`. */
+/** Current position as `[lng, lat]` (for the distances shown in Recent), or `null`. */
 function usePosition(): LngLat | null {
   return telemetry.use((t) => (t.fix ? ([t.fix.lng, t.fix.lat] as LngLat) : null));
 }
 
-/** Choose a place: navigate there, remember it, close. */
+/** Choose a place: navigate there (a new selection, even of the same place), remember it, close. */
 function goTo(place: Place): void {
-  nav.set((n) => ({ ...n, destination: place }));
-  addRecent(place);
+  navigateTo(place);
   closeSearchSheet();
 }
+
+/**
+ * Locked-field text, badge and footnote for each typing reason. The field text stays short
+ * enough for the narrowest landscape phone (iPhone SE, 667 wide) beside the badge; the
+ * footnote below carries the detail.
+ */
+const LOCK_COPY: Record<TypingReason, { field: string; badge: string; note: string }> = {
+  // Allowed reasons: the field is only locked without a token.
+  parked: { field: 'Search is off', badge: 'Parked', note: '' },
+  'no-gps': { field: 'Search is off', badge: 'No GPS', note: '' },
+  moving: { field: 'Stop to search', badge: 'Moving', note: 'Typing works only while parked. Tap a recent place to go.' },
+  'no-speed': {
+    field: 'Waiting for GPS',
+    badge: 'No speed',
+    note: 'GPS can’t confirm you’re stopped, so typing is off. Tap a recent place to go.',
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Pieces
@@ -240,7 +258,8 @@ function SkeletonRows() {
 // Columns
 // ---------------------------------------------------------------------------
 
-function RecentList({ position, columns }: { position: LngLat | null; columns: 1 | 2 }) {
+function RecentList({ columns }: { columns: 1 | 2 }) {
+  const position = usePosition();
   const list = recents.use();
   const units = settings.use((s) => s.units);
   if (list.length === 0) {
@@ -279,9 +298,11 @@ function RecentList({ position, columns }: { position: LngLat | null; columns: 1
   );
 }
 
-function SuggestionList({ query, position }: { query: string; position: LngLat | null }) {
+function SuggestionList({ query }: { query: string }) {
   const token = navToken();
   const sessionToken = searchSession.use();
+  // Frozen when the sheet opened: GPS wander while parked must not re-request the same text.
+  const position = searchOrigin.use();
   const units = settings.use((s) => s.units);
   const debounced = useDebounced(query, SEARCH_DEBOUNCE_MS);
   const suggestions = useSuggestions({ q: debounced, sessionToken, proximity: position }, token);
@@ -397,18 +418,18 @@ function SuggestionList({ query, position }: { query: string; position: LngLat |
 // ---------------------------------------------------------------------------
 
 function SearchField({
-  parked,
   query,
   onQuery,
   onEnter,
   inputRef,
 }: {
-  parked: boolean;
   query: string;
   onQuery: (q: string) => void;
   onEnter: () => void;
   inputRef: RefObject<HTMLInputElement | null>;
 }) {
+  const parked = useParked();
+  const reason = typingLock.use((l) => l.reason);
   const hasToken = navToken() !== '';
   const enabled = parked && hasToken;
   return (
@@ -461,13 +482,15 @@ function SearchField({
         ) : (
           <MotionBox key="locked" flex="1" minW="0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
             <Text fontSize="16px" fontWeight="500" color="text.tertiary" truncate aria-live="polite">
-              {parked ? 'Search unavailable' : 'Search unlocks when you stop'}
+              {LOCK_COPY[reason].field}
             </Text>
           </MotionBox>
         )}
       </AnimatePresence>
+      <AnimatePresence initial={false}>
       {enabled && query !== '' && (
-        <chakra.button
+        <MotionButton
+          key="clear"
           type="button"
           aria-label="Clear search"
           onClick={() => {
@@ -482,13 +505,18 @@ function SearchField({
           placeItems="center"
           color="text.secondary"
           cursor="pointer"
+          initial={{ opacity: 0, scale: 0.6 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={{ opacity: 0, scale: 0.6 }}
+          transition={{ duration: motionTokens.durationFast, ease: motionTokens.easeOut }}
         >
           {/* 44 px touch target around a 28 px disc. */}
           <Box as="span" w="28px" h="28px" rounded="full" display="grid" placeItems="center" bg="glass.control">
             <CloseGlyph size={12} />
           </Box>
-        </chakra.button>
+        </MotionButton>
       )}
+      </AnimatePresence>
       <Flex
         flex="none"
         align="center"
@@ -504,7 +532,7 @@ function SearchField({
         transition="background-color 0.3s, color 0.3s"
       >
         {parked ? <ParkedGlyph /> : <LockGlyph size={14} />}
-        {parked ? 'Parked' : 'Moving'}
+        {LOCK_COPY[reason].badge}
       </Flex>
     </Flex>
   );
@@ -513,7 +541,7 @@ function SearchField({
 function SearchSheet() {
   const titleId = useId();
   const parked = useParked();
-  const position = usePosition();
+  const reason = typingLock.use((l) => l.reason);
   const viewport = useVisualViewport();
   const [query, setQuery] = useState('');
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -589,7 +617,7 @@ function SearchSheet() {
             Search destinations
           </Text>
           <Flex gap="6px" align="center" flex="none">
-            <SearchField parked={parked} query={query} onQuery={setQuery} onEnter={onEnter} inputRef={inputRef} />
+            <SearchField query={query} onQuery={setQuery} onEnter={onEnter} inputRef={inputRef} />
             <MotionButton
               type="button"
               onClick={closeSearchSheet}
@@ -624,17 +652,17 @@ function SearchSheet() {
                 >
                   <Box minW="0">
                     <SectionTitle>Suggestions</SectionTitle>
-                    <SuggestionList query={query} position={position} />
+                    <SuggestionList query={query} />
                   </Box>
                   <Box minW="0">
                     <SectionTitle>Recent</SectionTitle>
-                    <RecentList position={position} columns={1} />
+                    <RecentList columns={1} />
                   </Box>
                 </MotionBox>
               ) : (
                 <MotionBox key="moving" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.25 }}>
                   <SectionTitle>Recent</SectionTitle>
-                  <RecentList position={position} columns={2} />
+                  <RecentList columns={2} />
                 </MotionBox>
               )}
             </AnimatePresence>
@@ -664,7 +692,7 @@ function SearchSheet() {
                 <Box flex="none" color="accent.fg">
                   <InfoGlyph />
                 </Box>
-                Typing works only while parked. Tap a recent place to go.
+                {LOCK_COPY[reason].note}
               </MotionBox>
             )}
           </AnimatePresence>

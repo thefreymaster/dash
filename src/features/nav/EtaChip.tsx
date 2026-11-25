@@ -79,7 +79,9 @@ const Caption = ({ children }: { children: ReactNode }) => (
   </Text>
 );
 
-function ActiveValues({ dim }: { dim: boolean }) {
+function ActiveValues() {
+  // Off the route (frozen progress) or a new route loading: the numbers are about to change.
+  const dim = navView.use((v) => v.status === 'off-route' || v.status === 'rerouting');
   const remainingS = navView.use((v) => v.progress?.remainingS ?? 0);
   const remainingM = navView.use((v) => v.progress?.remainingM ?? 0);
   const units = settings.use((s) => s.units);
@@ -108,7 +110,8 @@ function ActiveValues({ dim }: { dim: boolean }) {
   );
 }
 
-function StatusValues({ status }: { status: RouteStatus }) {
+function StatusValues() {
+  const status = navView.use((v) => v.status);
   const name = nav.use((n) => n.destination?.name ?? '');
   const problem = status === 'no-route' || status === 'error' || status === 'no-token';
   const title =
@@ -137,6 +140,9 @@ function StatusValues({ status }: { status: RouteStatus }) {
     </Flex>
   );
 }
+
+/** A route is on screen and being followed (possibly off it for a moment, or a new one loading). */
+const isGuiding = (status: RouteStatus) => status === 'active' || status === 'rerouting' || status === 'off-route';
 
 function ArrivedValues() {
   const name = nav.use((n) => n.destination?.name ?? '');
@@ -170,7 +176,7 @@ function ArrivedValues() {
 export function EtaChip() {
   const status = navView.use((v) => v.status);
   const hasProgress = navView.use((v) => v.progress !== null);
-  const view = status === 'arrived' ? 'arrived' : (status === 'active' || status === 'rerouting') && hasProgress ? 'active' : 'status';
+  const view = status === 'arrived' ? 'arrived' : isGuiding(status) && hasProgress ? 'active' : 'status';
   return (
     // The chip re-renders only when its view changes; the LayoutGroup lets the values inside
     // (`Fade`) make it re-measure when their width changes.
@@ -202,11 +208,11 @@ export function EtaChip() {
           transition={{ duration: 0.4, ease: motionTokens.easeOut }}
         >
           {view === 'active' ? (
-            <ActiveValues dim={status === 'rerouting'} />
+            <ActiveValues />
           ) : view === 'arrived' ? (
             <ArrivedValues />
           ) : (
-            <StatusValues status={status} />
+            <StatusValues />
           )}
         </MotionBox>
       </AnimatePresence>

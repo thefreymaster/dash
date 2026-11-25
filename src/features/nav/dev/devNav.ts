@@ -26,7 +26,7 @@ import { angleDiffDeg, bearingDeg, cumulativeLengthsM, haversineM, nearestPointO
 import { SIM_FALLBACK_LOOP } from '../../../sensors/simulator';
 import { addRecent, nav, recents } from '../../../state';
 import type { LngLat, Place } from '../../../types';
-import { endNavigation } from '../actions';
+import { endNavigation, navigateTo } from '../actions';
 import { closeSearchSheet, navView, openSearchSheet, searchOpen } from '../navState';
 import { __setDevNavToken } from '../token';
 
@@ -368,8 +368,7 @@ const hook = {
     const p = FIXTURE_PLACES.find((x) => x.name.toLowerCase().includes(name.toLowerCase()));
     if (!p) return null;
     const place: Place = { id: p.id, name: p.name, address: p.address, lat: p.lat, lng: p.lng };
-    nav.set((n) => ({ ...n, destination: place }));
-    addRecent(place);
+    navigateTo(place);
     return place;
   },
   cancel: endNavigation,

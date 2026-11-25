@@ -9,7 +9,10 @@ import {
   arcPath,
   digitScaleFor,
   gaugeFraction,
+  gaugeTarget,
+  readoutLive,
   speedDigits,
+  speedIsLive,
 } from './gauge';
 
 describe('arc geometry', () => {
@@ -88,6 +91,30 @@ describe('speedDigits', () => {
     expect(speedDigits(42, false)).toBe('–');
     expect(speedDigits(-3, true)).toBe('0');
     expect(speedDigits(Number.NaN, true)).toBe('0');
+  });
+});
+
+// Regression (review): the digits were gated only by `pose.hasPose`, so after signal loss the
+// last speed stayed on screen, and an unknown speed was drawn as 0 while driving.
+describe('unknown speed', () => {
+  it('the readout is live only with a pose AND a known speed (or during the boot sweep)', () => {
+    expect(speedIsLive(true, true)).toBe(true);
+    expect(speedIsLive(true, false)).toBe(false);
+    expect(speedIsLive(false, true)).toBe(false);
+    expect(readoutLive(speedIsLive(true, true), 0)).toBe(true);
+    expect(readoutLive(speedIsLive(true, false), 0)).toBe(false);
+    expect(readoutLive(speedIsLive(false, false), 0.3)).toBe(true);
+    // Unknown → the dimmed dash, never a remembered number or a fake 0.
+    expect(speedDigits(65, readoutLive(speedIsLive(true, false), 0))).toBe('–');
+  });
+
+  it('an unknown speed sends the arc to empty; the boot sweep still shows', () => {
+    const mps = 29; // ≈ 65 mph, the last speed before a tunnel
+    expect(gaugeTarget(mps, true, 0, UNIT_FACTOR.mph, FULL_SCALE.mph)).toBeCloseTo(64.87, 1);
+    expect(gaugeTarget(mps, false, 0, UNIT_FACTOR.mph, FULL_SCALE.mph)).toBe(0);
+    expect(gaugeTarget(mps, false, 0.5, UNIT_FACTOR.mph, FULL_SCALE.mph)).toBe(50);
+    expect(gaugeTarget(Number.NaN, true, 0, UNIT_FACTOR.mph, FULL_SCALE.mph)).toBe(0);
+    expect(gaugeTarget(-4, true, 0, UNIT_FACTOR.kmh, FULL_SCALE.kmh)).toBe(0);
   });
 });
 
